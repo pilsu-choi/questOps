@@ -47,7 +47,7 @@ async function runAnalysis(docId: string) {
   const row = db.prepare("SELECT * FROM documents WHERE id = ?").get(docId) as any;
   if (!row) return;
   try {
-    const result = await analyzeDocument(row.filename, row.extracted_text || "");
+    const result = await analyzeDocument(row.filename, row.extracted_text || "", row.project_id);
     db.prepare("UPDATE documents SET status = 'analyzed', analysis_result = ?, analyzed_at = ?, error_message = NULL WHERE id = ?").run(
       JSON.stringify(result),
       new Date().toISOString(),

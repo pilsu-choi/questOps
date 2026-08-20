@@ -1,6 +1,7 @@
 import { stepWithTools, type ToolCallMessage } from "../llm/toolCalling.js";
 import { logDebug } from "../logger.js";
-import type { AgentRunConfig, AgentRunResult, AgentToolResult, AgentTurnLog } from "./types.js";
+import type { AgentRunConfig, AgentRunResult, AgentTool, AgentToolResult, AgentTurnLog } from "./types.js";
+import { PLAN_TOOL_NAME, SUBMIT_TOOL_NAME } from "./tools.js";
 
 const DEFAULT_MAX_TURNS = 5;
 const DEFAULT_MAX_TOKENS_PER_TURN = 4096;
@@ -31,6 +32,11 @@ const RUNAWAY_RESPONSE_CHARS = 100_000;
 // 조회하는 경우)를 위한 하한선. 3~6턴짜리 유한 루프에서는 거의 트리거되지 않을 것으로 예상한다.
 const MAX_HISTORY_CHARS = 120_000;
 
+// 계획(update_plan)이나 스크래치 저장 확인처럼 짧은 tool 결과는 이미 압축된 것으로 보고
+// 건드리지 않는다 — 가장 오래된 tool 결과부터 축소하는 로직이 1턴째 계획을 제일 먼저
+// 지워버리지 않도록 임계값을 충분히 높게 잡는다.
+const MIN_SHRINKABLE_CONTENT_CHARS = 1000;
+
 // 가장 오래된 tool 결과부터 짧은 placeholder로 축소해 누적 히스토리 크기를 임계값 아래로
 // 내린다. 가장 최근 tool 결과는 모델이 방금 조회한 내용이라 절대 축소하지 않는다.
 export function shrinkOldestToolMessages(messages: ToolCallMessage[], maxChars: number): ToolCallMessage[] {
@@ -46,7 +52,7 @@ export function shrinkOldestToolMessages(messages: ToolCallMessage[], maxChars: 
     if (JSON.stringify(result).length <= maxChars) break;
     const idx = toolIndexes[k];
     const original = result[idx].content ?? "";
-    if (original.length <= 50) continue;
+    if (original.length <= MIN_SHRINKABLE_CONTENT_CHARS) continue;
     result[idx] = { ...result[idx], content: `[이전 tool 결과 생략됨, ${original.length}자]` };
   }
   return result;
@@ -55,6 +61,12 @@ export function shrinkOldestToolMessages(messages: ToolCallMessage[], maxChars: 
 function truncateForHistory(text: string | undefined): string | undefined {
   if (!text || text.length <= MAX_ASSISTANT_TEXT_CHARS_IN_HISTORY) return text;
   return `${text.slice(0, MAX_ASSISTANT_TEXT_CHARS_IN_HISTORY)}\n...(생략됨, 원본 ${text.length}자)`;
+}
+
+// 1턴째에 한해 update_plan tool이 있으면 강제 호출시킨다 — 모델이 조사/제출에 앞서
+// 계획부터 세우게 한다. update_plan이 없는 서비스는 항상 undefined라 동작 변화가 없다.
+export function computePlanForceTool(turn: number, tools: AgentTool[]): string | undefined {
+  return turn === 1 && tools.some((t) => t.name === PLAN_TOOL_NAME) ? PLAN_TOOL_NAME : undefined;
 }
 
 async function runTool(
@@ -88,7 +100,7 @@ async function tryRescueTurn(
   messages: ToolCallMessage[],
   turns: AgentTurnLog[]
 ): Promise<AgentRunResult | null> {
-  if (!config.tools.some((t) => t.name === "submit_result")) return null;
+  if (!config.tools.some((t) => t.name === SUBMIT_TOOL_NAME)) return null;
 
   logDebug(`[agent-loop] [${config.runLabel}] attempting rescue turn (forceTool=submit_result)`);
   const shrunkMessages = shrinkOldestToolMessages(messages, MAX_HISTORY_CHARS);
@@ -98,7 +110,7 @@ async function tryRescueTurn(
     rescueMessages,
     config.tools,
     config.maxTokensPerTurn ?? DEFAULT_MAX_TOKENS_PER_TURN,
-    "submit_result"
+    SUBMIT_TOOL_NAME
   );
 
   if (step.stopReason === "error") {
@@ -145,7 +157,15 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
     messages = shrinkOldestToolMessages(messages, MAX_HISTORY_CHARS);
     const turnStart = Date.now();
     logDebug(`[agent-loop] [${config.runLabel}] turn ${turn}/${maxTurns} calling model...`);
-    const step = await stepWithTools(config.systemPrompt, messages, config.tools, maxTokens);
+    const turnForceTool = computePlanForceTool(turn, config.tools);
+    let step = await stepWithTools(config.systemPrompt, messages, config.tools, maxTokens, turnForceTool);
+
+    if (step.stopReason === "error" && turnForceTool) {
+      logDebug(
+        `[agent-loop] [${config.runLabel}] turn ${turn} forced tool_choice(${turnForceTool}) failed (${step.errorMessage}), retrying without forceTool`
+      );
+      step = await stepWithTools(config.systemPrompt, messages, config.tools, maxTokens);
+    }
     logDebug(
       `[agent-loop] [${config.runLabel}] turn ${turn} model responded elapsedMs=${Date.now() - turnStart} stopReason=${step.stopReason} toolCalls=${step.toolCalls.length}`
     );

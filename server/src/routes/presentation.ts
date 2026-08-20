@@ -68,6 +68,7 @@ presentationRouter.post("/projects/:id/presentation/generate", async (req, res) 
     const scenario = demoRow?.scenario ? JSON.parse(demoRow.scenario) : undefined;
 
     const { result: slides } = await generatePresentationSlides({
+      projectId,
       projectName: project.name,
       client: project.client,
       description: project.description || "",

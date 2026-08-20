@@ -1,8 +1,11 @@
 import { z } from "zod";
+import { nanoid } from "nanoid";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
 import { toolCallingAvailable } from "../llm/toolCalling.js";
 import { runAgentLoop } from "../agent-runtime/loop.js";
-import { createSubmitTool, createReadTextChunkTool } from "../agent-runtime/tools.js";
+import { createSubmitTool, createReadTextChunkTool, createPlanTool } from "../agent-runtime/tools.js";
+import { createScratchWorkspaceTools, cleanupScratchWorkspace } from "../agent-runtime/scratchTools.js";
+import { createProjectDocumentTools } from "../agent-runtime/projectDocumentTools.js";
 import { saveAgentRunLog } from "../agent-runtime/log.js";
 import { logDebug, logError } from "../logger.js";
 import type { DocumentAnalysis } from "../types.js";
@@ -117,15 +120,20 @@ function heuristicAnalysis(filename: string, text: string): DocumentAnalysis {
 // 삼는 최상류 단계라, 단발성 completeJSON 대신 agent-runtime 위에서 먼저 시험한다.
 // tool-calling을 지원하는 provider(현재는 OpenRouter)로 설정돼 있을 때만 이 경로를
 // 타고, 그 외에는 아래 completeJSON 단일 턴 경로로 그대로 폴백한다.
-async function analyzeDocumentAgentic(filename: string, text: string): Promise<DocumentAnalysis> {
+async function analyzeDocumentAgentic(filename: string, text: string, projectId: string): Promise<DocumentAnalysis> {
   const preview = text.slice(0, 2000);
   const readChunkTool = createReadTextChunkTool("read_document_chunk", "문서 원문을 청크 단위로 읽는다.", text);
   const submitTool = createSubmitTool(DocumentAnalysisSchema, "문서 분석 결과를 제출한다.");
+  const planTool = createPlanTool();
+  const runId = nanoid(12);
+  const scratchTools = createScratchWorkspaceTools(runId);
+  const projectDocTools = createProjectDocumentTools(projectId);
 
-  const result = await runAgentLoop({
-    runLabel: "documentAnalysis",
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: `문서 파일명: ${filename}
+  try {
+    const result = await runAgentLoop({
+      runLabel: "documentAnalysis",
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: `문서 파일명: ${filename}
 문서 총 길이: ${text.length}자
 
 --- 문서 미리보기 (앞부분) ---
@@ -133,22 +141,27 @@ ${preview}
 --- 미리보기 끝 ---
 
 미리보기만으로 분석이 충분하지 않으면 read_document_chunk 툴로 필요한 구간을 더 읽어라.
+같은 프로젝트에 참고할 만한 다른 문서가 있으면 list_project_documents/read_project_document_chunk로 확인할 수 있다.
+제출 전에 초안을 write_scratch_file로 저장하고 read_scratch_file로 다시 읽어 다듬은 뒤 제출하라.
 분석이 끝나면 submit_result 툴을 호출해 다음 필드를 제출하라: businessContext, keyUsers, process, systems, businessRules, decisionPoints, exceptions, painPoints, aiOpportunities, unknowns.
 각 배열 항목은 문서 내용에 근거한 구체적 문장으로 작성하고 일반론은 금지한다.`,
-    tools: [readChunkTool, submitTool],
-    maxTurns: 6,
-    maxTokensPerTurn: 4096
-  });
+      tools: [planTool, readChunkTool, ...scratchTools, ...projectDocTools, submitTool],
+      maxTurns: 8,
+      maxTokensPerTurn: 4096
+    });
 
-  saveAgentRunLog(result);
+    saveAgentRunLog(result);
 
-  if (result.status === "submitted" && result.submission) {
-    return result.submission as DocumentAnalysis;
+    if (result.status === "submitted" && result.submission) {
+      return result.submission as DocumentAnalysis;
+    }
+    throw new Error(`문서 분석 에이전트가 최종 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
+  } finally {
+    cleanupScratchWorkspace(runId);
   }
-  throw new Error(`문서 분석 에이전트가 최종 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
 }
 
-export async function analyzeDocument(filename: string, text: string): Promise<DocumentAnalysis> {
+export async function analyzeDocument(filename: string, text: string, projectId: string): Promise<DocumentAnalysis> {
   const overallStart = Date.now();
   logDebug(`[documentAnalysis] start filename="${filename}" textChars=${text.length}`);
 
@@ -172,7 +185,7 @@ export async function analyzeDocument(filename: string, text: string): Promise<D
     if (toolCallingAvailable()) {
       logDebug(`[documentAnalysis] filename="${filename}" attempting agentic path`);
       try {
-        const result = await analyzeDocumentAgentic(filename, text);
+        const result = await analyzeDocumentAgentic(filename, text, projectId);
         logDebug(`[documentAnalysis] filename="${filename}" agentic path succeeded, totalElapsedMs=${Date.now() - overallStart}`);
         return result;
       } catch (err) {
