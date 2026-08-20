@@ -57,6 +57,10 @@ export function isRetryableStatus(status: number): boolean {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
+export function buildToolChoice(forceTool?: string): "auto" | { type: "function"; function: { name: string } } {
+  return forceTool ? { type: "function", function: { name: forceTool } } : "auto";
+}
+
 const RETRYABLE_BACKOFF_BASE_MS = 500;
 const RETRYABLE_BACKOFF_JITTER_MS = 250;
 const MAX_FETCH_ATTEMPTS = 3;
@@ -93,7 +97,8 @@ export async function stepWithTools(
   systemPrompt: string,
   messages: ToolCallMessage[],
   tools: AgentTool[],
-  maxTokens: number
+  maxTokens: number,
+  forceTool?: string
 ): Promise<ToolCallStepResult> {
   const cfg = resolveActiveConfig();
   if (!cfg) throw new NoLLMError();
@@ -122,7 +127,7 @@ export async function stepWithTools(
         max_tokens: maxTokens,
         messages: openAiMessages,
         tools: toOpenAiTools(tools),
-        tool_choice: "auto"
+        tool_choice: buildToolChoice(forceTool)
       })
     })
   );
