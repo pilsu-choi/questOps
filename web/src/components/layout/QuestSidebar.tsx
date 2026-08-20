@@ -1,10 +1,11 @@
 import { NavLink, useNavigate } from "react-router-dom";
-import { Check, Lock, FolderKanban, Upload, MessagesSquare, ClipboardList, LayoutPanelTop, Presentation, CheckSquare, FileText, ListTree, ChevronLeft, type LucideIcon } from "lucide-react";
+import { Check, Lock, FolderKanban, Upload, BookOpen, MessagesSquare, ClipboardList, LayoutPanelTop, Presentation, CheckSquare, FileText, ListTree, ChevronLeft, type LucideIcon } from "lucide-react";
 import type { Project, QuestStepId } from "../../types";
 import { cn } from "../../lib/cn";
 
 const STEP_ICON: Record<QuestStepId, LucideIcon> = {
   docs: Upload,
+  domain_knowledge: BookOpen,
   interview_questions: MessagesSquare,
   interview_answers: ClipboardList,
   demo: LayoutPanelTop,
@@ -16,6 +17,7 @@ const STEP_ICON: Record<QuestStepId, LucideIcon> = {
 
 const STEP_PATH: Record<QuestStepId, string> = {
   docs: "docs",
+  domain_knowledge: "domain-knowledge",
   interview_questions: "interview",
   interview_answers: "interview/answers",
   demo: "demo",

@@ -5,6 +5,7 @@ import { projectsRouter } from "./routes/projects.js";
 import { documentsRouter } from "./routes/documents.js";
 import { interviewRouter } from "./routes/interview.js";
 import { demoRouter } from "./routes/demo.js";
+import { domainKnowledgeRouter } from "./routes/domainKnowledge.js";
 import { presentationRouter } from "./routes/presentation.js";
 import { settingsRouter } from "./routes/settings.js";
 import { activeModelInfo, llmAvailable } from "./llm/provider.js";
@@ -32,6 +33,7 @@ app.use("/api/projects", projectsRouter);
 app.use("/api", documentsRouter);
 app.use("/api", interviewRouter);
 app.use("/api", demoRouter);
+app.use("/api", domainKnowledgeRouter);
 app.use("/api", presentationRouter);
 app.use("/api", settingsRouter);
 

@@ -11,6 +11,7 @@ import {
   ChevronDown,
   ChevronUp,
   Sparkles,
+  BookOpen,
   AlertTriangle
 } from "lucide-react";
 import { api } from "../api/client";
@@ -52,6 +53,7 @@ export default function DocumentsAnalysis() {
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [generatingDomainKnowledge, setGeneratingDomainKnowledge] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<number | null>(null);
 
@@ -132,22 +134,48 @@ export default function DocumentsAnalysis() {
     }
   };
 
+  const generateDomainKnowledge = async () => {
+    setGeneratingDomainKnowledge(true);
+    try {
+      await api.generateDomainKnowledge(project.id);
+      refresh();
+      toast.push("success", "도메인 지식이 생성되었습니다.");
+      navigate(`/projects/${project.id}/domain-knowledge`);
+    } catch (err) {
+      toast.push("error", (err as Error).message);
+    } finally {
+      setGeneratingDomainKnowledge(false);
+    }
+  };
+
   const analysisPct = totalCount === 0 ? 0 : Math.round((analyzedCount / totalCount) * 100);
 
   return (
     <div>
       <div className="flex items-start justify-between gap-4 mb-1 flex-wrap">
         <h1 className="text-[26px] font-bold text-navy-900 tracking-tight">자료 수집 &amp; 분석</h1>
-        <Button
-          variant="primary"
-          icon={<Sparkles size={16} />}
-          loading={generating}
-          disabled={!canGenerate}
-          onClick={generateInterview}
-          title={!canGenerate ? (analyzingCount > 0 ? "분석이 진행 중인 문서가 있습니다." : "분석 완료된 문서가 없습니다.") : undefined}
-        >
-          1차 인터뷰 질의서 생성
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            icon={<BookOpen size={16} />}
+            loading={generatingDomainKnowledge}
+            disabled={!canGenerate}
+            onClick={generateDomainKnowledge}
+            title={!canGenerate ? (analyzingCount > 0 ? "분석이 진행 중인 문서가 있습니다." : "분석 완료된 문서가 없습니다.") : undefined}
+          >
+            도메인 지식 생성
+          </Button>
+          <Button
+            variant="primary"
+            icon={<Sparkles size={16} />}
+            loading={generating}
+            disabled={!canGenerate}
+            onClick={generateInterview}
+            title={!canGenerate ? (analyzingCount > 0 ? "분석이 진행 중인 문서가 있습니다." : "분석 완료된 문서가 없습니다.") : undefined}
+          >
+            1차 인터뷰 질의서 생성
+          </Button>
+        </div>
       </div>
       <p className="text-[14px] text-slate-500 mb-7 max-w-2xl">프로젝트와 관련된 문서를 모두 제공해주세요. 제안서, RFP, 업무지침, 기존 시스템 문서 등.</p>
 

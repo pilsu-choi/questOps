@@ -6,6 +6,7 @@ import Settings from "./pages/Settings";
 import ProjectLayout from "./pages/ProjectLayout";
 import Dashboard from "./pages/Dashboard";
 import DocumentsAnalysis from "./pages/DocumentsAnalysis";
+import DomainKnowledge from "./pages/DomainKnowledge";
 import InterviewQuestionnaire from "./pages/InterviewQuestionnaire";
 import InterviewAnswers from "./pages/InterviewAnswers";
 import DemoBuilder from "./pages/DemoBuilder";
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/projects/:id" element={<ProjectLayout />}>
           <Route index element={<Dashboard />} />
           <Route path="docs" element={<DocumentsAnalysis />} />
+          <Route path="domain-knowledge" element={<DomainKnowledge />} />
           <Route path="interview" element={<InterviewQuestionnaire />} />
           <Route path="interview/answers" element={<InterviewAnswers />} />
           <Route path="demo" element={<DemoBuilder />} />

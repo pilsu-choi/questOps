@@ -140,6 +140,17 @@ CREATE TABLE IF NOT EXISTS demos (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS domain_knowledge (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'idle',
+  content TEXT,
+  html_path TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS llm_models (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -195,7 +206,7 @@ ensureColumn("presentations", "html_path", "html_path TEXT");
 function sweepStaleGeneratingRows() {
   const sweptAt = new Date().toISOString();
   const message = "서버가 재시작되어 생성이 중단되었습니다. 다시 시도해주세요.";
-  for (const table of ["interview_sets", "demos", "presentations"]) {
+  for (const table of ["interview_sets", "demos", "presentations", "domain_knowledge"]) {
     db.prepare(`UPDATE ${table} SET status = 'error', error_message = ?, updated_at = ? WHERE status = 'generating'`).run(
       message,
       sweptAt

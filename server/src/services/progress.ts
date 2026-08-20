@@ -2,6 +2,7 @@ import { db } from "../db.js";
 
 export const QUEST_STEPS = [
   { id: "docs", label: "자료 수집 & 분석" },
+  { id: "domain_knowledge", label: "도메인 지식" },
   { id: "interview_questions", label: "1차 인터뷰 질의서" },
   { id: "interview_answers", label: "인터뷰 결과 / 암묵지" },
   { id: "demo", label: "Demo UI" },
@@ -30,6 +31,7 @@ export interface ProjectProgress {
     questionCount: number;
     answeredCount: number;
     tacitKnowledgeCount: number;
+    domainKnowledgeReady: boolean;
     demoReady: boolean;
     presentationReady: boolean;
   };
@@ -56,6 +58,9 @@ export function computeProjectProgress(projectId: string): ProjectProgress {
   const tacitKnowledgeCount = (
     db.prepare("SELECT COUNT(*) c FROM tacit_knowledge WHERE project_id = ?").get(projectId) as any
   ).c;
+  const domainKnowledge = db
+    .prepare("SELECT * FROM domain_knowledge WHERE project_id = ? ORDER BY created_at DESC LIMIT 1")
+    .get(projectId) as any;
   const demo = db.prepare("SELECT * FROM demos WHERE project_id = ? ORDER BY created_at DESC LIMIT 1").get(projectId) as any;
   const presentation = db
     .prepare("SELECT * FROM presentations WHERE project_id = ? ORDER BY created_at DESC LIMIT 1")
@@ -63,6 +68,7 @@ export function computeProjectProgress(projectId: string): ProjectProgress {
 
   const done: Record<QuestStepId, boolean> = {
     docs: analyzedCount > 0,
+    domain_knowledge: domainKnowledge?.status === "ready",
     interview_questions: questionSet?.status === "ready" && questionCount > 0,
     interview_answers: answeredCount > 0 && questionCount > 0 && answeredCount >= questionCount,
     demo: demo?.status === "ready",
@@ -100,6 +106,7 @@ export function computeProjectProgress(projectId: string): ProjectProgress {
       questionCount,
       answeredCount,
       tacitKnowledgeCount,
+      domainKnowledgeReady: domainKnowledge?.status === "ready",
       demoReady: demo?.status === "ready",
       presentationReady: presentation?.status === "ready"
     }

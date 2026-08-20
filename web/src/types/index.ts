@@ -1,5 +1,6 @@
 export type QuestStepId =
   | "docs"
+  | "domain_knowledge"
   | "interview_questions"
   | "interview_answers"
   | "demo"
@@ -25,6 +26,7 @@ export interface ProjectProgress {
     questionCount: number;
     answeredCount: number;
     tacitKnowledgeCount: number;
+    domainKnowledgeReady: boolean;
     demoReady: boolean;
     presentationReady: boolean;
   };
@@ -179,6 +181,30 @@ export interface DemoState {
   scenario: DemoScenario | null;
   hasHtml?: boolean;
   errorMessage?: string | null;
+}
+
+export interface DomainKnowledgeContent {
+  companyOverview: string;
+  businessDomain: string;
+  domainKeywords: string[];
+  drivingDepartments: { name: string; role: string }[];
+  businessScope: string[];
+  keySystems: string[];
+  glossary: { term: string; definition: string }[];
+  domainRules: string[];
+  stakeholders: string[];
+  risksAndConsiderations: string[];
+  openQuestions: string[];
+}
+
+export interface DomainKnowledgeState {
+  id: string;
+  status: "idle" | "generating" | "ready" | "error";
+  content: DomainKnowledgeContent | null;
+  hasHtml: boolean;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PresentationSlide {

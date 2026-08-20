@@ -89,6 +89,20 @@ export interface DemoScenario {
   };
 }
 
+export interface DomainKnowledgeContent {
+  companyOverview: string;
+  businessDomain: string;
+  domainKeywords: string[];
+  drivingDepartments: { name: string; role: string }[];
+  businessScope: string[];
+  keySystems: string[];
+  glossary: { term: string; definition: string }[];
+  domainRules: string[];
+  stakeholders: string[];
+  risksAndConsiderations: string[];
+  openQuestions: string[];
+}
+
 export interface PresentationSlide {
   order: number;
   title: string;

@@ -7,6 +7,7 @@ import type {
   TacitKnowledgeItem,
   DemoState,
   AgentConcept,
+  DomainKnowledgeState,
   PresentationState,
   LlmModel,
   LlmActiveInfo,
@@ -84,6 +85,14 @@ export const api = {
     });
   },
   listTacitKnowledge: (projectId: string) => req<TacitKnowledgeItem[]>(`/projects/${projectId}/tacit-knowledge`),
+
+  domainKnowledgeEligibility: (projectId: string) =>
+    req<{ eligible: boolean; analyzedCount: number; reason: string }>(`/projects/${projectId}/domain-knowledge/eligibility`),
+  getDomainKnowledge: (projectId: string) => req<DomainKnowledgeState | null>(`/projects/${projectId}/domain-knowledge`),
+  generateDomainKnowledge: (projectId: string) =>
+    req<DomainKnowledgeState>(`/projects/${projectId}/domain-knowledge/generate`, { method: "POST" }),
+  domainKnowledgeHtmlUrl: (id: string) => `${BASE}/domain-knowledge/${id}/html`,
+  domainKnowledgeDownloadUrl: (id: string) => `${BASE}/domain-knowledge/${id}/download`,
 
   demoEligibility: (projectId: string) =>
     req<{ eligible: boolean; answeredCount: number; analyzedDocCount: number; reason: string }>(`/projects/${projectId}/demo/eligibility`),
