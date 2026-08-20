@@ -142,6 +142,7 @@ ${preview}
 
 미리보기만으로 분석이 충분하지 않으면 read_document_chunk 툴로 필요한 구간을 더 읽어라.
 같은 프로젝트에 참고할 만한 다른 문서가 있으면 list_project_documents/read_project_document_chunk로 확인할 수 있다.
+제출 전에 초안을 write_scratch_file로 저장하고 read_scratch_file로 다시 읽어 다듬은 뒤 제출하라.
 분석이 끝나면 submit_result 툴을 호출해 다음 필드를 제출하라: businessContext, keyUsers, process, systems, businessRules, decisionPoints, exceptions, painPoints, aiOpportunities, unknowns.
 각 배열 항목은 문서 내용에 근거한 구체적 문장으로 작성하고 일반론은 금지한다.`,
       tools: [planTool, readChunkTool, ...scratchTools, ...projectDocTools, submitTool],

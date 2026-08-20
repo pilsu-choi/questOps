@@ -232,7 +232,7 @@ async function generateSlidePlanAgentic(input: PptInput): Promise<PresentationSl
     const result = await runAgentLoop({
       runLabel: "pptGeneration",
       systemPrompt: SYSTEM_PROMPT,
-      userPrompt: `${buildUserPrompt(input)}\n\n필요하면 list_project_documents/read_project_document_chunk로 이 프로젝트의 다른 문서를 참고할 수 있다.`,
+      userPrompt: `${buildUserPrompt(input)}\n\n필요하면 list_project_documents/read_project_document_chunk로 이 프로젝트의 다른 문서를 참고할 수 있다.\n제출 전에 슬라이드 구성 초안을 write_scratch_file로 저장하고 다시 읽어 다듬을 수 있다.`,
       tools: [planTool, ...scratchTools, ...projectDocTools, submitTool],
       maxTurns: 6,
       maxTokensPerTurn: 8000
