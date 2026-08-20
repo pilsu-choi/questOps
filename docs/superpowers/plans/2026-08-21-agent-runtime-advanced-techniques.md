@@ -997,7 +997,9 @@ git commit -m "feat(agent-runtime): 정적 서브에이전트 fan-out 프리미�
 
 - [ ] **Step 2: `loop.ts`의 `runAgentLoop` 위 주석 수정**
 
-이미 Task 4/6에서 다음 내용으로 교체됐다(별도 작업 불필요, 아래는 확인용):
+Task 1~7 어느 태스크도 이 주석 블록을 건드리지 않았으므로 원본 그대로 남아 있다. `export async
+function runAgentLoop` 바로 위의 기존 주석 블록(`// 턴 루프: 모델 호출 -> tool 실행 -> ...`로
+시작하는 3줄)을 다음으로 교체한다:
 
 ```ts
 // 턴 루프: 모델 호출 -> tool 실행 -> 결과를 컨텍스트에 append -> 반복.
@@ -1005,8 +1007,6 @@ git commit -m "feat(agent-runtime): 정적 서브에이전트 fan-out 프리미�
 // 목적이라 steering/동적 서브에이전트 스폰/요약 컴팩션 없이 명시적 maxTurns 상한 +
 // 정적 fan-out(fanOut.ts) + 안전장치(재시도, 검증 예산, 컨텍스트 축소, 구제 턴) 위주로 구성한다.
 ```
-
-이 주석이 Task 4의 Step 3에서 이미 반영되지 않았다면 지금 반영한다(원래 파일과 diff 확인 후).
 
 - [ ] **Step 3: 타입 체크**
 
