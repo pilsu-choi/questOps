@@ -150,20 +150,66 @@ function stripFences(text: string): string {
   const trimmed = text.trim();
   const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
   if (fenceMatch) return fenceMatch[1];
-  return trimmed;
+  // Some models truncate before emitting the closing ``` — strip a dangling opening fence too.
+  const openOnly = trimmed.match(/^```(?:json)?\s*([\s\S]*)$/);
+  return openOnly ? openOnly[1] : trimmed;
+}
+
+// Some models (especially smaller/community models via OpenRouter) get cut off before
+// finishing the JSON — either they hit the requested max_tokens, or the provider silently
+// caps output shorter than what we asked for. Rather than hard-failing, close out whatever
+// strings/arrays/objects were left open so we can recover the fields that did complete.
+function repairTruncatedJson(body: string): string | null {
+  let inString = false;
+  let escape = false;
+  const stack: ("{" | "[")[] = [];
+
+  for (const c of body) {
+    if (inString) {
+      if (escape) escape = false;
+      else if (c === "\\") escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === "{" || c === "[") stack.push(c);
+    else if (c === "}" && stack[stack.length - 1] === "{") stack.pop();
+    else if (c === "]" && stack[stack.length - 1] === "[") stack.pop();
+  }
+
+  if (!inString && stack.length === 0) return null; // nothing to repair
+
+  let repaired = body;
+  if (inString) repaired += '"';
+  repaired = repaired.replace(/,\s*$/, "").replace(/:\s*$/, ": null");
+  for (let i = stack.length - 1; i >= 0; i--) repaired += stack[i] === "{" ? "}" : "]";
+  return repaired;
 }
 
 export async function completeJSON<T>(system: string, user: string, maxTokens = 8192): Promise<T> {
   const raw = await completeText(system, user, maxTokens);
   const cleaned = stripFences(raw);
-  const start = cleaned.indexOf("{") === -1 ? cleaned.indexOf("[") : Math.min(...[cleaned.indexOf("{"), cleaned.indexOf("[")].filter((i) => i >= 0));
-  const lastBrace = cleaned.lastIndexOf("}");
-  const lastBracket = cleaned.lastIndexOf("]");
-  const end = Math.max(lastBrace, lastBracket);
-  const jsonSlice = start >= 0 && end >= 0 ? cleaned.slice(start, end + 1) : cleaned;
+  const firstBrace = cleaned.indexOf("{");
+  const firstBracket = cleaned.indexOf("[");
+  const candidates = [firstBrace, firstBracket].filter((i) => i >= 0);
+  const start = candidates.length ? Math.min(...candidates) : -1;
+  const body = start >= 0 ? cleaned.slice(start) : cleaned;
+
   try {
-    return JSON.parse(jsonSlice) as T;
-  } catch (err) {
-    throw new Error(`Failed to parse LLM JSON output: ${(err as Error).message}\nRaw: ${raw.slice(0, 500)}`);
+    return JSON.parse(body) as T;
+  } catch (firstErr) {
+    const repaired = repairTruncatedJson(body);
+    if (repaired) {
+      try {
+        return JSON.parse(repaired) as T;
+      } catch {
+        // fall through to the original error below — repair attempt didn't help
+      }
+    }
+    throw new Error(
+      `Failed to parse LLM JSON output (response may have been truncated before max_tokens=${maxTokens} was reached): ${
+        (firstErr as Error).message
+      }\nRaw (last 400 chars): ...${raw.slice(-400)}`
+    );
   }
 }
