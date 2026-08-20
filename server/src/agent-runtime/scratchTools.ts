@@ -32,11 +32,11 @@ export function createScratchWorkspaceTools(runId: string): AgentTool[] {
       },
       required: ["name", "content"]
     },
-    execute(args?: { name: string; content: string }) {
-      assertSafeFilename(args!.name);
+    execute(args: { name: string; content: string }) {
+      assertSafeFilename(args.name);
       fs.mkdirSync(root, { recursive: true });
-      fs.writeFileSync(path.join(root, args!.name), args!.content, "utf-8");
-      return { content: `"${args!.name}" 저장됨 (${args!.content.length}자).` };
+      fs.writeFileSync(path.join(root, args.name), args.content, "utf-8");
+      return { content: `"${args.name}" 저장됨 (${args.content.length}자).` };
     }
   };
 
@@ -44,10 +44,10 @@ export function createScratchWorkspaceTools(runId: string): AgentTool[] {
     name: "read_scratch_file",
     description: "이전에 write_scratch_file로 저장한 파일을 읽는다.",
     parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
-    execute(args?: { name: string }) {
-      assertSafeFilename(args!.name);
-      const p = path.join(root, args!.name);
-      if (!fs.existsSync(p)) return { content: `"${args!.name}" 파일이 없다. write_scratch_file로 먼저 저장하라.` };
+    execute(args: { name: string }) {
+      assertSafeFilename(args.name);
+      const p = path.join(root, args.name);
+      if (!fs.existsSync(p)) return { content: `"${args.name}" 파일이 없다. write_scratch_file로 먼저 저장하라.` };
       return { content: fs.readFileSync(p, "utf-8") };
     }
   };
@@ -56,7 +56,7 @@ export function createScratchWorkspaceTools(runId: string): AgentTool[] {
     name: "list_scratch_files",
     description: "지금까지 저장한 임시 파일 목록을 본다.",
     parameters: { type: "object", properties: {}, required: [] },
-    execute(args?: unknown) {
+    execute() {
       if (!fs.existsSync(root)) return { content: "아직 저장된 파일이 없다." };
       const files = fs.readdirSync(root);
       return { content: files.length ? files.join("\n") : "아직 저장된 파일이 없다." };
