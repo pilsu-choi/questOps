@@ -16,6 +16,9 @@ const MAX_CONSECUTIVE_VALIDATION_FAILURES = 3;
 const NO_TOOL_CALL_NUDGE =
   "결과는 반드시 등록된 tool을 호출해서 제출해야 한다. 설명이나 요약을 텍스트로 직접 답하지 말고, 필요한 조사를 마쳤으면 submit_result 툴을 호출하라.";
 
+const RESCUE_NUDGE =
+  "더 이상 조사를 진행할 수 없다. 지금까지 확인한 내용을 바탕으로 최선을 다해 submit_result를 호출해 제출하라.";
+
 // 일부 OpenRouter 라우팅(예: Venice가 서빙하는 reasoning 모델)은 max_tokens를 사실상
 // 무시하고 수십만~수백만 자짜리 폭주 응답을 낼 때가 있다. 이걸 그대로 대화 히스토리에
 // 쌓으면 다음 턴 요청 크기가 턴마다 누적돼 provider의 컨텍스트 한도를 순식간에 넘긴다.
@@ -77,6 +80,46 @@ async function runTool(
   }
 }
 
+// 정상 턴 예산이 소진되기 직전, 마지막으로 딱 1번 tool_choice를 submit_result로 강제해
+// "지금까지 조사한 내용으로 최선을 다해 제출하라"는 구제 턴을 시도한다. 이 턴에서도 실패하면
+// 추가 구제 없이 그대로 포기한다(무한 루프 방지 - 구제는 런 전체에서 정확히 1회만 허용).
+async function tryRescueTurn(
+  config: AgentRunConfig,
+  messages: ToolCallMessage[],
+  turns: AgentTurnLog[]
+): Promise<AgentRunResult | null> {
+  if (!config.tools.some((t) => t.name === "submit_result")) return null;
+
+  logDebug(`[agent-loop] [${config.runLabel}] attempting rescue turn (forceTool=submit_result)`);
+  const rescueMessages: ToolCallMessage[] = [...messages, { role: "user", content: RESCUE_NUDGE }];
+  const step = await stepWithTools(
+    config.systemPrompt,
+    rescueMessages,
+    config.tools,
+    config.maxTokensPerTurn ?? DEFAULT_MAX_TOKENS_PER_TURN,
+    "submit_result"
+  );
+
+  if (step.stopReason === "error" || step.toolCalls.length === 0) {
+    logDebug(`[agent-loop] [${config.runLabel}] rescue turn produced no tool call, giving up`);
+    return null;
+  }
+
+  const turnLog: AgentTurnLog = { turn: turns.length + 1, assistantText: truncateForHistory(step.assistantText), toolCalls: [] };
+  for (const call of step.toolCalls) {
+    const result = await runTool(config, call);
+    turnLog.toolCalls.push({ name: call.name, args: call.arguments, resultSummary: result.content.slice(0, 300) });
+    if (result.terminate) {
+      turns.push(turnLog);
+      logDebug(`[agent-loop] [${config.runLabel}] rescue turn submitted successfully`);
+      return { runLabel: config.runLabel, status: "submitted", submission: result.details, turns };
+    }
+  }
+  turns.push(turnLog);
+  logDebug(`[agent-loop] [${config.runLabel}] rescue turn tool call did not terminate, giving up`);
+  return null;
+}
+
 // 턴 루프: 모델 호출 -> tool 실행 -> 결과를 컨텍스트에 append -> 반복.
 // openClaw의 agent-loop 패턴을 차용하되, QuestOps는 유한한 구조화 산출물 생성이
 // 목적이라 steering/서브에이전트/컴팩션 없이 명시적 maxTurns 상한만 둔다.
@@ -87,6 +130,7 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
   const turns: AgentTurnLog[] = [];
   let consecutiveNoToolCallTurns = 0;
   let consecutiveValidationFailures = 0;
+  let rescueAttempted = false;
   const runStart = Date.now();
 
   logDebug(`[agent-loop] start [${config.runLabel}] maxTurns=${maxTurns} maxTokensPerTurn=${maxTokens} tools=${config.tools.map((t) => t.name).join(",")}`);
@@ -125,6 +169,11 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
       logDebug(`[agent-loop] [${config.runLabel}] turn ${turn} no tool call (consecutive=${consecutiveNoToolCallTurns})`);
       if (consecutiveNoToolCallTurns >= MAX_CONSECUTIVE_NO_TOOL_CALL_TURNS) {
         logDebug(`[agent-loop] [${config.runLabel}] giving up after ${consecutiveNoToolCallTurns} tool-less turns, totalElapsedMs=${Date.now() - runStart}`);
+        if (!rescueAttempted) {
+          rescueAttempted = true;
+          const rescued = await tryRescueTurn(config, messages, turns);
+          if (rescued) return rescued;
+        }
         return {
           runLabel: config.runLabel,
           status: "exhausted",
@@ -174,6 +223,11 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
 
     if (consecutiveValidationFailures >= MAX_CONSECUTIVE_VALIDATION_FAILURES) {
       logDebug(`[agent-loop] [${config.runLabel}] giving up after ${consecutiveValidationFailures} consecutive validation failures`);
+      if (!rescueAttempted) {
+        rescueAttempted = true;
+        const rescued = await tryRescueTurn(config, messages, turns);
+        if (rescued) return rescued;
+      }
       return {
         runLabel: config.runLabel,
         status: "validation_exhausted",
@@ -184,5 +238,10 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
   }
 
   logDebug(`[agent-loop] [${config.runLabel}] exhausted after ${maxTurns} turns, totalElapsedMs=${Date.now() - runStart}`);
+  if (!rescueAttempted) {
+    rescueAttempted = true;
+    const rescued = await tryRescueTurn(config, messages, turns);
+    if (rescued) return rescued;
+  }
   return { runLabel: config.runLabel, status: "exhausted", turns };
 }
