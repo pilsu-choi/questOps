@@ -952,8 +952,23 @@ async function generateSlidePlanAgentic(input: PptInput): Promise<PresentationSl
 
 - [ ] **Step 3: `routes/presentation.ts` 호출부 수정**
 
-`server/src/routes/presentation.ts`의 `generatePresentationSlides({ ... })` 호출(현재
-70번째 줄 근처) 안, `projectName: project.name,` 바로 위에 한 줄 추가:
+`server/src/routes/presentation.ts`의 다음 블록(현재 70~79번째 줄)을:
+
+```ts
+    const { result: slides } = await generatePresentationSlides({
+      projectName: project.name,
+      client: project.client,
+      description: project.description || "",
+      analyses,
+      tacitKnowledge: tacitRows,
+      agent,
+      screens,
+      scenario
+    });
+```
+
+다음으로 교체(`projectName: project.name,` 바로 위에 `projectId,` 한 줄만 추가, 나머지
+필드는 전부 그대로):
 
 ```ts
     const { result: slides } = await generatePresentationSlides({
@@ -965,7 +980,8 @@ async function generateSlidePlanAgentic(input: PptInput): Promise<PresentationSl
       tacitKnowledge: tacitRows,
       agent,
       screens,
-      // ... (이하 원본과 동일, scenario 등 나머지 필드는 그대로 둔다)
+      scenario
+    });
 ```
 
 (32번째 줄에서 이미 선언된 지역 변수 `projectId`를 그대로 넘긴다.)
@@ -999,9 +1015,9 @@ git commit -m "feat(pptGeneration): planning/scratch/project-document tool 통�
 - **스펙 커버리지**: 스펙의 1(Planning)=Task1+Task2, 2(스크래치 워크스페이스)=Task3,
   3(프로젝트 문서 접근)=Task4, 4(서비스 통합)=Task5+Task6 전부 태스크로 매핑됨. 인터페이스
   변경 요약 표의 8개 파일 전부 태스크에 등장함.
-- **플레이스홀더 스캔**: "TBD"/"나중에"/"적절히 처리" 류 문구 없음. Task 6 Step 3의 `// ...
-  (이하 원본과 동일...)` 주석은 실제 코드 생략이 아니라 "이 필드들은 건드리지 않는다"는
-  지시이며, 바로 위 문장에서 명시적으로 설명함 — 플레이스홀더가 아니라 편집 범위 한정.
+- **플레이스홀더 스캔**: "TBD"/"나중에"/"적절히 처리" 류 문구 없음. Pre-flight 스캔에서 Task 6
+  Step 3이 원래 `// ...` 생략 표기를 쓰고 있던 걸 발견해, 전체 블록을 완전한 before/after
+  코드로 교체함(아래 pre-flight 스캔 표 참고).
 - **타입 일관성**: `PLAN_TOOL_NAME`/`SUBMIT_TOOL_NAME`(Task1) → `loop.ts`의
   `computePlanForceTool`/`tryRescueTurn`(Task2)까지 동일한 이름으로 import·사용 확인.
   `createScratchWorkspaceTools`/`cleanupScratchWorkspace`(Task3) → Task5/Task6에서 동일한
