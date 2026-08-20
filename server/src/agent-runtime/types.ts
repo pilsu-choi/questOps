@@ -10,6 +10,9 @@ export interface AgentToolResult {
   details?: unknown;
   /** true면 이 tool 호출을 마지막으로 루프를 종료한다. */
   terminate?: boolean;
+  /** true면 이 결과가 submit_result 스키마 검증 실패로 인한 것임을 표시한다.
+   *  loop.ts가 문자열 매칭 없이 검증 실패를 감지해 별도 예산(연속 횟수)으로 추적하는 데 쓴다. */
+  isValidationError?: boolean;
 }
 
 export interface AgentTool<TArgs = any> {
@@ -36,7 +39,7 @@ export interface AgentTurnLog {
   toolCalls: { name: string; args: string; resultSummary: string }[];
 }
 
-export type AgentRunStatus = "submitted" | "exhausted" | "error";
+export type AgentRunStatus = "submitted" | "exhausted" | "error" | "validation_exhausted";
 
 export interface AgentRunResult {
   runLabel: string;

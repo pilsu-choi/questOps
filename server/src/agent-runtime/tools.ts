@@ -15,7 +15,7 @@ export function createSubmitTool<T>(schema: ZodType<T>, description: string): Ag
       const parsed = schema.safeParse(args);
       if (!parsed.success) {
         const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
-        return { content: `검증 실패 - ${issues}\n스키마에 맞춰 submit_result를 다시 호출하라.` };
+        return { content: `검증 실패 - ${issues}\n스키마에 맞춰 submit_result를 다시 호출하라.`, isValidationError: true };
       }
       return { content: "제출이 접수되었습니다.", details: parsed.data, terminate: true };
     }
