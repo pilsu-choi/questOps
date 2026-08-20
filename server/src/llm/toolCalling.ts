@@ -53,11 +53,61 @@ function toOpenAiMessages(systemPrompt: string, messages: ToolCallMessage[]) {
   return out;
 }
 
+export function isRetryableStatus(status: number): boolean {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+export function buildToolChoice(forceTool?: string): "auto" | { type: "function"; function: { name: string } } {
+  return forceTool ? { type: "function", function: { name: forceTool } } : "auto";
+}
+
+const RETRYABLE_BACKOFF_BASE_MS = 500;
+const RETRYABLE_BACKOFF_JITTER_MS = 250;
+const MAX_FETCH_ATTEMPTS = 3;
+
+export function computeBackoffMs(attempt: number): number {
+  return RETRYABLE_BACKOFF_BASE_MS * 2 ** attempt + Math.floor(Math.random() * RETRYABLE_BACKOFF_JITTER_MS);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 429(rate limit)나 5xx(provider 일시 장애) 하나로 3~6턴짜리 실행 전체가 죽지 않도록,
+// 재시도 가능한 실패만 지수 백오프로 재시도한다. 400 등 클라이언트 오류는 재시도해도
+// 같은 응답이 반복될 뿐이라 즉시 반환한다. doFetch를 인자로 받아 순수하게 테스트 가능하게 한다.
+export async function fetchWithRetry(doFetch: () => Promise<Response>): Promise<{ res?: Response; errorMessage?: string }> {
+  let lastErrorMessage = "";
+  for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt++) {
+    try {
+      const res = await doFetch();
+      if (res.ok || !isRetryableStatus(res.status) || attempt === MAX_FETCH_ATTEMPTS - 1) {
+        return { res };
+      }
+      const backoffMs = computeBackoffMs(attempt);
+      logDebug(
+        `[llm][toolCalling] retry attempt=${attempt + 1}/${MAX_FETCH_ATTEMPTS} waitMs=${backoffMs} reason=status:${res.status}`
+      );
+      await sleep(backoffMs);
+    } catch (err) {
+      lastErrorMessage = (err as Error).message;
+      if (attempt === MAX_FETCH_ATTEMPTS - 1) return { errorMessage: lastErrorMessage };
+      const backoffMs = computeBackoffMs(attempt);
+      logDebug(
+        `[llm][toolCalling] retry attempt=${attempt + 1}/${MAX_FETCH_ATTEMPTS} waitMs=${backoffMs} reason=${lastErrorMessage}`
+      );
+      await sleep(backoffMs);
+    }
+  }
+  return { errorMessage: lastErrorMessage || "알 수 없는 오류" };
+}
+
 export async function stepWithTools(
   systemPrompt: string,
   messages: ToolCallMessage[],
   tools: AgentTool[],
-  maxTokens: number
+  maxTokens: number,
+  forceTool?: string
 ): Promise<ToolCallStepResult> {
   const cfg = resolveActiveConfig();
   if (!cfg) throw new NoLLMError();
@@ -72,22 +122,29 @@ export async function stepWithTools(
     `[llm][toolCalling] request model=${cfg.model} maxTokens=${maxTokens} messages=${openAiMessages.length} promptChars=${promptChars} tools=${tools.map((t) => t.name).join(",")}`
   );
 
-  const res = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${cfg.apiKey}`,
-      "HTTP-Referer": "https://questops.local",
-      "X-Title": "QuestOps"
-    },
-    body: JSON.stringify({
-      model: cfg.model,
-      max_tokens: maxTokens,
-      messages: openAiMessages,
-      tools: toOpenAiTools(tools),
-      tool_choice: "auto"
+  const { res, errorMessage } = await fetchWithRetry(() =>
+    fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cfg.apiKey}`,
+        "HTTP-Referer": "https://questops.local",
+        "X-Title": "QuestOps"
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        max_tokens: maxTokens,
+        messages: openAiMessages,
+        tools: toOpenAiTools(tools),
+        tool_choice: buildToolChoice(forceTool)
+      })
     })
-  });
+  );
+
+  if (!res) {
+    logDebug(`[llm][toolCalling] request failed after retries elapsedMs=${Date.now() - start}: ${errorMessage}`);
+    return { toolCalls: [], stopReason: "error", errorMessage: `LLM 요청 실패: ${errorMessage}` };
+  }
 
   if (!res.ok) {
     const errText = (await res.text()).slice(0, 500);
