@@ -1,6 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+// multer/busboy decode multipart filename headers as latin1 by default, even though
+// browsers actually send UTF-8 bytes — so a Korean filename arrives mojibake'd
+// (e.g. "외환.docx" -> "ì¸í.docx"). Re-interpreting those bytes as UTF-8 recovers
+// the original name. Safe to call on already-correct ASCII names (no-op).
+export function fixUploadedFilename(name: string): string {
+  return Buffer.from(name, "latin1").toString("utf8");
+}
+
 export function docFileType(filename: string): string {
   const ext = path.extname(filename).toLowerCase().replace(".", "");
   const map: Record<string, string> = {

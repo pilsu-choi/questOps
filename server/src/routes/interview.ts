@@ -9,7 +9,7 @@ import { generateInterviewQuestions } from "../services/interviewGeneration.js";
 import { generateInterviewDocx } from "../services/docxGeneration.js";
 import { extractInsightsFromAnswer } from "../services/tacitExtraction.js";
 import { mapTranscriptToAnswers } from "../services/interviewAnswerMapping.js";
-import { extractText } from "../services/fileParsing.js";
+import { extractText, fixUploadedFilename } from "../services/fileParsing.js";
 import type { DocInput } from "../services/factExtraction.js";
 import type { InterviewQuestionItem } from "../types.js";
 
@@ -321,8 +321,9 @@ interviewRouter.post("/projects/:id/interview/answers/upload", answerUpload.sing
     .prepare("SELECT * FROM interview_questions WHERE set_id = ? ORDER BY order_num ASC")
     .all(set.id) as any[];
 
+  const displayName = fixUploadedFilename(file.originalname);
   try {
-    const transcript = await extractText(file.path, file.originalname);
+    const transcript = await extractText(file.path, displayName);
     if (!transcript || transcript.trim().length < 20) {
       return res.status(422).json({ error: "파일에서 텍스트를 추출하지 못했습니다. 텍스트가 포함된 문서인지 확인하세요." });
     }
@@ -336,11 +337,11 @@ interviewRouter.post("/projects/:id/interview/answers/upload", answerUpload.sing
     for (const m of mapped) {
       const question = questions.find((q) => q.id === m.questionId);
       if (!question || !m.answerText.trim()) continue;
-      await saveAnswerForQuestion(question, m.answerText.trim(), null, "upload", file.originalname);
+      await saveAnswerForQuestion(question, m.answerText.trim(), null, "upload", displayName);
       results.push({ questionId: m.questionId, saved: true });
     }
 
-    res.status(201).json({ matchedCount: results.length, totalQuestions: questions.length, filename: file.originalname });
+    res.status(201).json({ matchedCount: results.length, totalQuestions: questions.length, filename: displayName });
   } catch (err) {
     res.status(500).json({ error: `답변 파일 처리 실패: ${(err as Error).message}` });
   } finally {

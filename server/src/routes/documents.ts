@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 import { db } from "../db.js";
-import { docFileType, extractText } from "../services/fileParsing.js";
+import { docFileType, extractText, fixUploadedFilename } from "../services/fileParsing.js";
 import { analyzeDocument } from "../services/documentAnalysis.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -19,7 +19,7 @@ const storage = multer.diskStorage({
     cb(null, dir);
   },
   filename: (_req, file, cb) => {
-    cb(null, `${nanoid(8)}__${file.originalname}`);
+    cb(null, `${nanoid(8)}__${fixUploadedFilename(file.originalname)}`);
   }
 });
 const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
@@ -73,12 +73,13 @@ documentsRouter.post("/projects/:id/documents", upload.array("files", 20), async
   for (const file of files) {
     const id = nanoid(10);
     const now = new Date().toISOString();
-    const fileType = docFileType(file.originalname);
+    const displayName = fixUploadedFilename(file.originalname);
+    const fileType = docFileType(displayName);
     let extractedText = "";
     let status = "analyzing";
     let errorMessage: string | null = null;
     try {
-      extractedText = await extractText(file.path, file.originalname);
+      extractedText = await extractText(file.path, displayName);
     } catch (err) {
       status = "failed";
       errorMessage = (err as Error).message;
@@ -86,7 +87,7 @@ documentsRouter.post("/projects/:id/documents", upload.array("files", 20), async
     db.prepare(
       `INSERT INTO documents (id, project_id, filename, file_type, size_bytes, uploader, storage_path, extracted_text, status, error_message, uploaded_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(id, req.params.id, file.originalname, fileType, file.size, req.body.uploader || "me", file.path, extractedText, status, errorMessage, now);
+    ).run(id, req.params.id, displayName, fileType, file.size, req.body.uploader || "me", file.path, extractedText, status, errorMessage, now);
     created.push(id);
     if (status === "analyzing") {
       runAnalysis(id).catch((e) => console.error("analysis error", e));
