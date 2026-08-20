@@ -1,7 +1,9 @@
 // 범용 Agent Loop 런타임의 공용 타입.
 // openClaw(ref_projects/openclaw)의 turn/tool 루프 패턴을 참고하되,
 // QuestOps는 개방형 대화가 아니라 "유한한 구조화 산출물 생성"이 목적이므로
-// steering 큐, 서브에이전트, 컨텍스트 컴팩션 없이 최소 형태로 구성한다.
+// steering 큐, 동적 서브에이전트 스폰(모델이 스스로 트리거하는), 요약 기반 컨텍스트 컴팩션은
+// 두지 않는다. 대신 정적 fan-out(fanOut.ts), 재시도/구제 턴, 컨텍스트 축소 안전장치로
+// 신뢰성을 높인다.
 
 export interface AgentToolResult {
   /** 모델에게 tool 결과로 되돌려줄 텍스트. */

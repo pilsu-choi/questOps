@@ -122,7 +122,8 @@ async function tryRescueTurn(
 
 // 턴 루프: 모델 호출 -> tool 실행 -> 결과를 컨텍스트에 append -> 반복.
 // openClaw의 agent-loop 패턴을 차용하되, QuestOps는 유한한 구조화 산출물 생성이
-// 목적이라 steering/서브에이전트/컴팩션 없이 명시적 maxTurns 상한만 둔다.
+// 목적이라 steering/동적 서브에이전트 스폰/요약 컴팩션 없이 명시적 maxTurns 상한 +
+// 정적 fan-out(fanOut.ts) + 안전장치(재시도, 검증 예산, 컨텍스트 축소, 구제 턴) 위주로 구성한다.
 export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResult> {
   const maxTurns = config.maxTurns ?? DEFAULT_MAX_TURNS;
   const maxTokens = config.maxTokensPerTurn ?? DEFAULT_MAX_TOKENS_PER_TURN;
