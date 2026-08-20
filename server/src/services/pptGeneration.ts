@@ -1,13 +1,17 @@
 import { z } from "zod";
+import { nanoid } from "nanoid";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
 import { toolCallingAvailable } from "../llm/toolCalling.js";
 import { runAgentLoop } from "../agent-runtime/loop.js";
-import { createSubmitTool } from "../agent-runtime/tools.js";
+import { createSubmitTool, createPlanTool } from "../agent-runtime/tools.js";
+import { createScratchWorkspaceTools, cleanupScratchWorkspace } from "../agent-runtime/scratchTools.js";
+import { createProjectDocumentTools } from "../agent-runtime/projectDocumentTools.js";
 import { saveAgentRunLog } from "../agent-runtime/log.js";
 import type { AgentConcept, DemoScreen, DemoScenario, DocumentAnalysis, PresentationSlide } from "../types.js";
 import { logError } from "../logger.js";
 
 export interface PptInput {
+  projectId: string;
   projectName: string;
   client: string;
   description: string;
@@ -219,22 +223,30 @@ function heuristicSlidePlan(input: PptInput): PresentationSlide[] {
 
 async function generateSlidePlanAgentic(input: PptInput): Promise<PresentationSlide[]> {
   const submitTool = createSubmitTool(SlidePlanSchema, "발표자료 슬라이드 구성안을 제출한다.");
+  const planTool = createPlanTool();
+  const runId = nanoid(12);
+  const scratchTools = createScratchWorkspaceTools(runId);
+  const projectDocTools = createProjectDocumentTools(input.projectId);
 
-  const result = await runAgentLoop({
-    runLabel: "pptGeneration",
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: buildUserPrompt(input),
-    tools: [submitTool],
-    maxTurns: 4,
-    maxTokensPerTurn: 8000
-  });
+  try {
+    const result = await runAgentLoop({
+      runLabel: "pptGeneration",
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: `${buildUserPrompt(input)}\n\n필요하면 list_project_documents/read_project_document_chunk로 이 프로젝트의 다른 문서를 참고할 수 있다.`,
+      tools: [planTool, ...scratchTools, ...projectDocTools, submitTool],
+      maxTurns: 6,
+      maxTokensPerTurn: 8000
+    });
 
-  saveAgentRunLog(result);
+    saveAgentRunLog(result);
 
-  if (result.status === "submitted" && result.submission) {
-    return renumber((result.submission as { slides: PresentationSlide[] }).slides);
+    if (result.status === "submitted" && result.submission) {
+      return renumber((result.submission as { slides: PresentationSlide[] }).slides);
+    }
+    throw new Error(`PPT 생성 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
+  } finally {
+    cleanupScratchWorkspace(runId);
   }
-  throw new Error(`PPT 생성 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
 }
 
 export async function generatePresentationSlides(input: PptInput): Promise<{ result: PresentationSlide[]; mode: "llm" | "heuristic" }> {
