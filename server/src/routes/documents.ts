@@ -7,6 +7,7 @@ import { nanoid } from "nanoid";
 import { db } from "../db.js";
 import { docFileType, extractText, fixUploadedFilename } from "../services/fileParsing.js";
 import { analyzeDocument } from "../services/documentAnalysis.js";
+import { logError } from "../logger.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uploadsRoot = path.join(__dirname, "..", "..", "uploads");
@@ -90,7 +91,7 @@ documentsRouter.post("/projects/:id/documents", upload.array("files", 20), async
     ).run(id, req.params.id, displayName, fileType, file.size, req.body.uploader || "me", file.path, extractedText, status, errorMessage, now);
     created.push(id);
     if (status === "analyzing") {
-      runAnalysis(id).catch((e) => console.error("analysis error", e));
+      runAnalysis(id).catch((e) => logError("analysis error", e));
     }
   }
   db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), req.params.id);
@@ -103,7 +104,7 @@ documentsRouter.post("/documents/:id/reanalyze", async (req, res) => {
   const row = db.prepare("SELECT * FROM documents WHERE id = ?").get(req.params.id) as any;
   if (!row) return res.status(404).json({ error: "문서를 찾을 수 없습니다." });
   db.prepare("UPDATE documents SET status = 'analyzing', error_message = NULL WHERE id = ?").run(req.params.id);
-  runAnalysis(req.params.id).catch((e) => console.error("analysis error", e));
+  runAnalysis(req.params.id).catch((e) => logError("analysis error", e));
   const updated = db.prepare("SELECT * FROM documents WHERE id = ?").get(req.params.id);
   res.json(serializeDoc(updated));
 });

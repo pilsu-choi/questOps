@@ -1,6 +1,12 @@
+import { z } from "zod";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
+import { toolCallingAvailable } from "../llm/toolCalling.js";
+import { runAgentLoop } from "../agent-runtime/loop.js";
+import { createSubmitTool } from "../agent-runtime/tools.js";
+import { saveAgentRunLog } from "../agent-runtime/log.js";
 import type { EvidenceRef, InterviewQuestionItem } from "../types.js";
 import { buildGroundedFacts, factSheetText, type DocInput, type GroundedFact } from "./factExtraction.js";
+import { logDebug, logError } from "../logger.js";
 
 const BASE_CATEGORIES = ["Business", "User", "Process", "System", "AI", "Operation"] as const;
 
@@ -72,6 +78,19 @@ interface RawItem {
   evidenceFactIds: string[];
   sampleAnswer?: string;
 }
+
+const RawItemSchema = z.object({
+  category: z.string(),
+  subType: z.string().nullable().optional(),
+  question: z.string().min(1),
+  intent: z.string(),
+  expectedInsight: z.string(),
+  tacitKnowledgeType: z.string(),
+  evidenceFactIds: z.array(z.string()),
+  sampleAnswer: z.string().optional()
+});
+// tool-calling 함수 인자는 top-level object여야 해서 배열을 { questions: [...] }로 감싼다.
+const InterviewQuestionsOutputSchema = z.object({ questions: z.array(RawItemSchema) });
 
 function toEvidence(factIds: string[], factMap: Map<string, GroundedFact>): EvidenceRef[] {
   return factIds
@@ -196,29 +215,66 @@ function heuristicGenerate(facts: GroundedFact[]): RawItem[] {
   });
 }
 
+async function generateInterviewQuestionsAgentic(projectSummary: string, facts: GroundedFact[]): Promise<RawItem[]> {
+  const submitTool = createSubmitTool(InterviewQuestionsOutputSchema, "1차 인터뷰 질의서를 제출한다.");
+
+  const result = await runAgentLoop({
+    runLabel: "interviewGeneration",
+    systemPrompt: SYSTEM_PROMPT,
+    userPrompt: `${buildUserPrompt(projectSummary, facts)}\n\n작성이 끝나면 submit_result 툴을 호출해 questions 배열을 제출하라.`,
+    tools: [submitTool],
+    maxTurns: 4,
+    maxTokensPerTurn: 8000
+  });
+
+  saveAgentRunLog(result);
+
+  if (result.status === "submitted" && result.submission) {
+    return (result.submission as { questions: RawItem[] }).questions;
+  }
+  throw new Error(`인터뷰 질의서 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
+}
+
 export async function generateInterviewQuestions(
   projectSummary: string,
   docs: DocInput[]
 ): Promise<{ questions: InterviewQuestionItem[]; mode: "llm" | "heuristic" }> {
+  const overallStart = Date.now();
   const facts = buildGroundedFacts(docs);
   const factMap = new Map(facts.map((f) => [f.id, f]));
+  logDebug(`[interviewGeneration] start docs=${docs.length} facts=${facts.length}`);
 
   if (facts.length === 0) {
+    logDebug(`[interviewGeneration] no facts extracted, skipping straight to empty result`);
     return { questions: [], mode: "heuristic" };
   }
 
   if (llmAvailable()) {
+    if (toolCallingAvailable()) {
+      logDebug(`[interviewGeneration] attempting agentic path`);
+      try {
+        const raw = await generateInterviewQuestionsAgentic(projectSummary, facts);
+        const finalized = finalize(raw, factMap);
+        logDebug(`[interviewGeneration] agentic path returned ${finalized.length} questions, totalElapsedMs=${Date.now() - overallStart}`);
+        if (finalized.length > 0) return { questions: finalized, mode: "llm" };
+      } catch (err) {
+        logError("agent loop failed for interviewGeneration, falling back to single-turn completeJSON", err);
+      }
+    }
+    logDebug(`[interviewGeneration] attempting single-turn completeJSON path`);
     try {
       const raw = await completeJSON<RawItem[]>(SYSTEM_PROMPT, buildUserPrompt(projectSummary, facts), 24000);
       const finalized = finalize(raw, factMap);
+      logDebug(`[interviewGeneration] completeJSON path returned ${finalized.length} questions, totalElapsedMs=${Date.now() - overallStart}`);
       if (finalized.length > 0) return { questions: finalized, mode: "llm" };
     } catch (err) {
       if (!(err instanceof NoLLMError)) {
-        console.error("LLM interview generation failed, falling back to heuristic:", err);
+        logError("LLM interview generation failed, falling back to heuristic", err);
       }
     }
   }
 
+  logDebug(`[interviewGeneration] using heuristic fallback, totalElapsedMs=${Date.now() - overallStart}`);
   const raw = heuristicGenerate(facts);
   return { questions: finalize(raw, factMap), mode: "heuristic" };
 }

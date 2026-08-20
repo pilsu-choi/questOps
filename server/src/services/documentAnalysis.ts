@@ -1,6 +1,25 @@
+import { z } from "zod";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
+import { toolCallingAvailable } from "../llm/toolCalling.js";
+import { runAgentLoop } from "../agent-runtime/loop.js";
+import { createSubmitTool, createReadTextChunkTool } from "../agent-runtime/tools.js";
+import { saveAgentRunLog } from "../agent-runtime/log.js";
+import { logDebug, logError } from "../logger.js";
 import type { DocumentAnalysis } from "../types.js";
 import { splitSentences, matchLines } from "./textUtils.js";
+
+const DocumentAnalysisSchema = z.object({
+  businessContext: z.string().min(1, "businessContext는 비어 있을 수 없다"),
+  keyUsers: z.array(z.string()),
+  process: z.array(z.string()),
+  systems: z.array(z.string()),
+  businessRules: z.array(z.string()),
+  decisionPoints: z.array(z.string()),
+  exceptions: z.array(z.string()),
+  painPoints: z.array(z.string()),
+  aiOpportunities: z.array(z.string()),
+  unknowns: z.array(z.string())
+});
 
 const SYSTEM_PROMPT = `당신은 금융/기업 업무 프로세스를 분석하는 Senior Business Analyst이자 AI Agent 설계 컨설턴트다.
 제공된 프로젝트 문서 원문을 근거로 구조화된 분석 결과를 JSON으로만 출력한다.
@@ -94,8 +113,47 @@ function heuristicAnalysis(filename: string, text: string): DocumentAnalysis {
   };
 }
 
+// 문서 분석은 후속 4단계(질의서/답변매핑/암묵지/Demo UI)가 전부 이 출력을 근거로
+// 삼는 최상류 단계라, 단발성 completeJSON 대신 agent-runtime 위에서 먼저 시험한다.
+// tool-calling을 지원하는 provider(현재는 OpenRouter)로 설정돼 있을 때만 이 경로를
+// 타고, 그 외에는 아래 completeJSON 단일 턴 경로로 그대로 폴백한다.
+async function analyzeDocumentAgentic(filename: string, text: string): Promise<DocumentAnalysis> {
+  const preview = text.slice(0, 2000);
+  const readChunkTool = createReadTextChunkTool("read_document_chunk", "문서 원문을 청크 단위로 읽는다.", text);
+  const submitTool = createSubmitTool(DocumentAnalysisSchema, "문서 분석 결과를 제출한다.");
+
+  const result = await runAgentLoop({
+    runLabel: "documentAnalysis",
+    systemPrompt: SYSTEM_PROMPT,
+    userPrompt: `문서 파일명: ${filename}
+문서 총 길이: ${text.length}자
+
+--- 문서 미리보기 (앞부분) ---
+${preview}
+--- 미리보기 끝 ---
+
+미리보기만으로 분석이 충분하지 않으면 read_document_chunk 툴로 필요한 구간을 더 읽어라.
+분석이 끝나면 submit_result 툴을 호출해 다음 필드를 제출하라: businessContext, keyUsers, process, systems, businessRules, decisionPoints, exceptions, painPoints, aiOpportunities, unknowns.
+각 배열 항목은 문서 내용에 근거한 구체적 문장으로 작성하고 일반론은 금지한다.`,
+    tools: [readChunkTool, submitTool],
+    maxTurns: 6,
+    maxTokensPerTurn: 4096
+  });
+
+  saveAgentRunLog(result);
+
+  if (result.status === "submitted" && result.submission) {
+    return result.submission as DocumentAnalysis;
+  }
+  throw new Error(`문서 분석 에이전트가 최종 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
+}
+
 export async function analyzeDocument(filename: string, text: string): Promise<DocumentAnalysis> {
+  const overallStart = Date.now();
+  logDebug(`[documentAnalysis] start filename="${filename}" textChars=${text.length}`);
+
   if (!text || text.trim().length < 20) {
+    logDebug(`[documentAnalysis] filename="${filename}" text too short, skipping analysis`);
     return {
       businessContext: "문서에서 추출된 텍스트가 거의 없어 자동 분석을 수행할 수 없습니다. 이미지 기반 문서일 수 있습니다.",
       keyUsers: [],
@@ -111,11 +169,29 @@ export async function analyzeDocument(filename: string, text: string): Promise<D
   }
 
   if (llmAvailable()) {
+    if (toolCallingAvailable()) {
+      logDebug(`[documentAnalysis] filename="${filename}" attempting agentic path`);
+      try {
+        const result = await analyzeDocumentAgentic(filename, text);
+        logDebug(`[documentAnalysis] filename="${filename}" agentic path succeeded, totalElapsedMs=${Date.now() - overallStart}`);
+        return result;
+      } catch (err) {
+        // 에이전트 루프가 실패해도(모델이 tool-calling을 신뢰성 있게 지원하지 않는 경우 등)
+        // 기존 단일 턴 completeJSON 경로로 한 번 더 시도한다 — agentic 도입 전과 동일하게
+        // "LLM 있으면 최선을 다해보고, 그래도 안 되면 휴리스틱" 폴백 체인을 유지한다.
+        logError("agent loop failed for documentAnalysis, falling back to single-turn completeJSON", err);
+      }
+    }
+    logDebug(`[documentAnalysis] filename="${filename}" attempting single-turn completeJSON path`);
     try {
-      return await completeJSON<DocumentAnalysis>(SYSTEM_PROMPT, buildUserPrompt(filename, text), 16000);
+      const result = await completeJSON<DocumentAnalysis>(SYSTEM_PROMPT, buildUserPrompt(filename, text), 16000);
+      logDebug(`[documentAnalysis] filename="${filename}" completeJSON path succeeded, totalElapsedMs=${Date.now() - overallStart}`);
+      return result;
     } catch (err) {
       if (!(err instanceof NoLLMError)) throw err;
+      logDebug(`[documentAnalysis] filename="${filename}" no LLM configured, falling back to heuristic`);
     }
   }
+  logDebug(`[documentAnalysis] filename="${filename}" using heuristic fallback, totalElapsedMs=${Date.now() - overallStart}`);
   return heuristicAnalysis(filename, text);
 }

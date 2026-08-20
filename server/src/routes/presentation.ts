@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 import { db } from "../db.js";
-import { buildSlidePlan } from "../services/pptGeneration.js";
+import { generatePresentationSlides } from "../services/pptGeneration.js";
 import { renderPresentationHtml } from "../services/pptHtmlGeneration.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -67,7 +67,7 @@ presentationRouter.post("/projects/:id/presentation/generate", async (req, res) 
     const screens = demoRow?.screens ? JSON.parse(demoRow.screens) : undefined;
     const scenario = demoRow?.scenario ? JSON.parse(demoRow.scenario) : undefined;
 
-    const slides = buildSlidePlan({
+    const { result: slides } = await generatePresentationSlides({
       projectName: project.name,
       client: project.client,
       description: project.description || "",

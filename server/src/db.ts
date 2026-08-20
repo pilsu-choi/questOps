@@ -151,6 +151,15 @@ CREATE TABLE IF NOT EXISTS llm_models (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_run_logs (
+  id TEXT PRIMARY KEY,
+  run_label TEXT NOT NULL,
+  status TEXT NOT NULL,
+  turn_count INTEGER NOT NULL,
+  detail TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS presentations (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -177,3 +186,20 @@ ensureColumn("interview_answers", "source", "source TEXT NOT NULL DEFAULT 'manua
 ensureColumn("interview_answers", "source_document", "source_document TEXT");
 ensureColumn("demos", "html_path", "html_path TEXT");
 ensureColumn("presentations", "html_path", "html_path TEXT");
+
+// A row left in 'generating' status belongs to a request handler that ran in a previous
+// process (this process just started). That handler is gone, so the row can never reach
+// 'ready' or 'error' on its own — without this sweep it sits there forever and, since these
+// generation endpoints always surface the most-recently-created row regardless of status,
+// permanently hides the last real result behind a "generating" screen.
+function sweepStaleGeneratingRows() {
+  const sweptAt = new Date().toISOString();
+  const message = "서버가 재시작되어 생성이 중단되었습니다. 다시 시도해주세요.";
+  for (const table of ["interview_sets", "demos", "presentations"]) {
+    db.prepare(`UPDATE ${table} SET status = 'error', error_message = ?, updated_at = ? WHERE status = 'generating'`).run(
+      message,
+      sweptAt
+    );
+  }
+}
+sweepStaleGeneratingRows();

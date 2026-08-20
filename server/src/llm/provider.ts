@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { db } from "../db.js";
+import { logDebug } from "../logger.js";
 
 export class NoLLMError extends Error {
   constructor() {
@@ -17,7 +18,7 @@ export const PROVIDERS: { id: ProviderId; label: string }[] = [
   { id: "google", label: "Google (Gemini)" }
 ];
 
-interface ActiveLlmConfig {
+export interface ActiveLlmConfig {
   provider: ProviderId;
   apiKey: string;
   model: string;
@@ -25,7 +26,30 @@ interface ActiveLlmConfig {
   source: "registered" | "env";
 }
 
-function resolveActiveConfig(): ActiveLlmConfig | null {
+// None of the raw `fetch` calls to LLM providers had a timeout, so a stalled response
+// (dead connection, provider hang) left the caller — and any DB row tracking that request
+// as "generating" — stuck forever with no way to recover short of a server restart.
+export const LLM_REQUEST_TIMEOUT_MS = 120_000;
+
+export async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if ((err as Error).name === "AbortError") {
+      throw new Error(`LLM 요청이 ${LLM_REQUEST_TIMEOUT_MS / 1000}초 내에 응답하지 않아 중단했습니다.`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// agent-runtime의 tool-calling 드라이버(llm/toolCalling.ts)가 provider/apiKey에
+// 직접 접근해야 해서 export한다. completeText/completeJSON을 쓰는 기존 서비스들은
+// 계속 llmAvailable()/activeModelInfo()만 쓰면 된다.
+export function resolveActiveConfig(): ActiveLlmConfig | null {
   const row = db.prepare("SELECT * FROM llm_models WHERE is_active = 1 LIMIT 1").get() as any;
   if (row && row.api_key) {
     return { provider: (row.provider || "anthropic") as ProviderId, apiKey: row.api_key, model: row.model_id, modelName: row.name, source: "registered" };
@@ -66,14 +90,21 @@ const ANTHROPIC_MAX_TOKENS_CEILING = 8192;
 
 async function completeAnthropic(apiKey: string, model: string, system: string, user: string, maxTokens: number): Promise<string> {
   const c = getAnthropicClient(apiKey);
-  const res = await c.messages.create({
-    model,
-    max_tokens: Math.min(maxTokens, ANTHROPIC_MAX_TOKENS_CEILING),
-    system,
-    messages: [{ role: "user", content: user }]
-  });
+  const start = Date.now();
+  logDebug(`[llm] anthropic request model=${model} maxTokens=${maxTokens} promptChars=${system.length + user.length}`);
+  const res = await c.messages.create(
+    {
+      model,
+      max_tokens: Math.min(maxTokens, ANTHROPIC_MAX_TOKENS_CEILING),
+      system,
+      messages: [{ role: "user", content: user }]
+    },
+    { timeout: LLM_REQUEST_TIMEOUT_MS }
+  );
   const block = res.content.find((b) => b.type === "text");
-  return block && block.type === "text" ? block.text : "";
+  const text = block && block.type === "text" ? block.text : "";
+  logDebug(`[llm] anthropic response elapsedMs=${Date.now() - start} responseChars=${text.length} stopReason=${res.stop_reason}`);
+  return text;
 }
 
 // ---- OpenAI / OpenRouter (OpenAI Chat Completions 호환 API) ----
@@ -87,7 +118,9 @@ async function completeOpenAiCompatible(
   maxTokens: number,
   extraHeaders?: Record<string, string>
 ): Promise<string> {
-  const res = await fetch(`${baseUrl}/chat/completions`, {
+  const start = Date.now();
+  logDebug(`[llm] ${providerLabel} request model=${model} maxTokens=${maxTokens} promptChars=${system.length + user.length}`);
+  const res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -104,16 +137,24 @@ async function completeOpenAiCompatible(
     })
   });
   if (!res.ok) {
-    throw new Error(`${providerLabel} API 오류 (${res.status}): ${(await res.text()).slice(0, 500)}`);
+    const errText = (await res.text()).slice(0, 500);
+    logDebug(`[llm] ${providerLabel} error elapsedMs=${Date.now() - start} status=${res.status}`);
+    throw new Error(`${providerLabel} API 오류 (${res.status}): ${errText}`);
   }
   const data = (await res.json()) as any;
-  return data.choices?.[0]?.message?.content ?? "";
+  const text = data.choices?.[0]?.message?.content ?? "";
+  logDebug(
+    `[llm] ${providerLabel} response elapsedMs=${Date.now() - start} responseChars=${text.length} finishReason=${data.choices?.[0]?.finish_reason}`
+  );
+  return text;
 }
 
 // ---- Google Gemini ----
 async function completeGoogle(apiKey: string, model: string, system: string, user: string, maxTokens: number): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
-  const res = await fetch(url, {
+  const start = Date.now();
+  logDebug(`[llm] google request model=${model} maxTokens=${maxTokens} promptChars=${system.length + user.length}`);
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -123,16 +164,21 @@ async function completeGoogle(apiKey: string, model: string, system: string, use
     })
   });
   if (!res.ok) {
-    throw new Error(`Google API 오류 (${res.status}): ${(await res.text()).slice(0, 500)}`);
+    const errText = (await res.text()).slice(0, 500);
+    logDebug(`[llm] google error elapsedMs=${Date.now() - start} status=${res.status}`);
+    throw new Error(`Google API 오류 (${res.status}): ${errText}`);
   }
   const data = (await res.json()) as any;
   const parts = data.candidates?.[0]?.content?.parts ?? [];
-  return parts.map((p: any) => p.text || "").join("");
+  const text = parts.map((p: any) => p.text || "").join("");
+  logDebug(`[llm] google response elapsedMs=${Date.now() - start} responseChars=${text.length}`);
+  return text;
 }
 
 export async function completeText(system: string, user: string, maxTokens = 4096): Promise<string> {
   const cfg = resolveActiveConfig();
   if (!cfg) throw new NoLLMError();
+  logDebug(`[llm] completeText via provider=${cfg.provider} model=${cfg.model} (${cfg.source})`);
 
   switch (cfg.provider) {
     case "anthropic":
@@ -201,12 +247,17 @@ export async function completeJSON<T>(system: string, user: string, maxTokens = 
   const body = start >= 0 ? cleaned.slice(start) : cleaned;
 
   try {
-    return JSON.parse(body) as T;
+    const parsed = JSON.parse(body) as T;
+    logDebug(`[llm] completeJSON parsed cleanly (bodyChars=${body.length})`);
+    return parsed;
   } catch (firstErr) {
+    logDebug(`[llm] completeJSON initial parse failed, attempting truncation repair: ${(firstErr as Error).message}`);
     const repaired = repairTruncatedJson(body);
     if (repaired) {
       try {
-        return JSON.parse(repaired) as T;
+        const parsed = JSON.parse(repaired) as T;
+        logDebug(`[llm] completeJSON recovered via truncation repair`);
+        return parsed;
       } catch {
         // fall through to the original error below — repair attempt didn't help
       }

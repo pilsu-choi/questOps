@@ -1,5 +1,11 @@
+import { z } from "zod";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
+import { toolCallingAvailable } from "../llm/toolCalling.js";
+import { runAgentLoop } from "../agent-runtime/loop.js";
+import { createSubmitTool } from "../agent-runtime/tools.js";
+import { saveAgentRunLog } from "../agent-runtime/log.js";
 import type { AgentConcept, DemoScreen, DemoScenario, DocumentAnalysis, InterviewQuestionItem } from "../types.js";
+import { logDebug, logError } from "../logger.js";
 
 export interface DemoGenerationInput {
   projectName: string;
@@ -85,6 +91,60 @@ interface RawDemo {
   screens: DemoScreen[];
   scenario: DemoScenario;
 }
+
+const AgentWorkflowStepSchema = z.object({
+  order: z.number(),
+  name: z.string(),
+  description: z.string(),
+  actor: z.enum(["agent", "human", "system"]),
+  criteria: z.array(z.string()).optional()
+});
+
+const AgentConceptSchema = z.object({
+  name: z.string(),
+  purpose: z.string(),
+  users: z.array(z.string()),
+  input: z.array(z.string()),
+  workflow: z.array(AgentWorkflowStepSchema),
+  rules: z.array(z.string()),
+  exceptions: z.array(z.string()),
+  dataSources: z.array(z.string()),
+  humanApproval: z.object({ required: z.boolean(), points: z.array(z.string()) }),
+  output: z.array(z.string())
+});
+
+const DemoScreenSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["input", "analysis", "decision", "monitor"]),
+  title: z.string(),
+  description: z.string(),
+  status: z.enum(["confirmed", "ai_inferred", "need_confirmation"]),
+  mockData: z.record(z.any())
+});
+
+const DemoScenarioSchema = z.object({
+  caseId: z.string(),
+  agentName: z.string(),
+  steps: z.array(
+    z.object({
+      label: z.string(),
+      status: z.enum(["pass", "warn", "fail"]),
+      detail: z.string(),
+      evidenceQuestionId: z.string().optional()
+    })
+  ),
+  decision: z.object({
+    outcome: z.enum(["approve", "review_required", "reject"]),
+    reason: z.string(),
+    confidence: z.number()
+  })
+});
+
+const RawDemoSchema = z.object({
+  agent: AgentConceptSchema,
+  screens: z.array(DemoScreenSchema),
+  scenario: DemoScenarioSchema
+});
 
 function heuristicGenerate(input: DemoGenerationInput): RawDemo {
   const rules = input.analyses.flatMap((a) => a.businessRules).slice(0, 6);
@@ -179,14 +239,50 @@ function heuristicGenerate(input: DemoGenerationInput): RawDemo {
   return { agent, screens, scenario };
 }
 
+async function generateAgentDemoAgentic(input: DemoGenerationInput): Promise<RawDemo> {
+  const submitTool = createSubmitTool(RawDemoSchema, "Agent 컨셉과 Demo 화면/시나리오를 제출한다.");
+
+  const result = await runAgentLoop({
+    runLabel: "agentDemoGeneration",
+    systemPrompt: SYSTEM_PROMPT,
+    userPrompt: `${buildUserPrompt(input)}\n\n설계가 끝나면 submit_result 툴을 호출해 제출하라.`,
+    tools: [submitTool],
+    maxTurns: 6,
+    maxTokensPerTurn: 8000
+  });
+
+  saveAgentRunLog(result);
+
+  if (result.status === "submitted" && result.submission) {
+    return result.submission as RawDemo;
+  }
+  throw new Error(`Demo 생성 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
+}
+
 export async function generateAgentDemo(input: DemoGenerationInput): Promise<{ result: RawDemo; mode: "llm" | "heuristic" }> {
+  const overallStart = Date.now();
+  logDebug(`[agentDemoGeneration] start project="${input.projectName}" analyses=${input.analyses.length} qaPairs=${input.qaPairs.length} tacitKnowledge=${input.tacitKnowledge.length}`);
+
   if (llmAvailable()) {
+    if (toolCallingAvailable()) {
+      logDebug(`[agentDemoGeneration] attempting agentic path`);
+      try {
+        const raw = await generateAgentDemoAgentic(input);
+        logDebug(`[agentDemoGeneration] agentic path returned agent=${Boolean(raw?.agent)} screens=${raw?.screens?.length ?? 0}, totalElapsedMs=${Date.now() - overallStart}`);
+        if (raw?.agent && raw?.screens?.length) return { result: raw, mode: "llm" };
+      } catch (err) {
+        logError("agent loop failed for agentDemoGeneration, falling back to single-turn completeJSON", err);
+      }
+    }
+    logDebug(`[agentDemoGeneration] attempting single-turn completeJSON path`);
     try {
       const raw = await completeJSON<RawDemo>(SYSTEM_PROMPT, buildUserPrompt(input), 16000);
+      logDebug(`[agentDemoGeneration] completeJSON path returned agent=${Boolean(raw?.agent)} screens=${raw?.screens?.length ?? 0}, totalElapsedMs=${Date.now() - overallStart}`);
       if (raw?.agent && raw?.screens?.length) return { result: raw, mode: "llm" };
     } catch (err) {
-      if (!(err instanceof NoLLMError)) console.error("LLM demo generation failed, falling back:", err);
+      if (!(err instanceof NoLLMError)) logError("LLM demo generation failed, falling back", err);
     }
   }
+  logDebug(`[agentDemoGeneration] using heuristic fallback, totalElapsedMs=${Date.now() - overallStart}`);
   return { result: heuristicGenerate(input), mode: "heuristic" };
 }
