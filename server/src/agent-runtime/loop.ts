@@ -1,6 +1,7 @@
 import { stepWithTools, type ToolCallMessage } from "../llm/toolCalling.js";
 import { logDebug } from "../logger.js";
-import type { AgentRunConfig, AgentRunResult, AgentToolResult, AgentTurnLog } from "./types.js";
+import type { AgentRunConfig, AgentRunResult, AgentTool, AgentToolResult, AgentTurnLog } from "./types.js";
+import { PLAN_TOOL_NAME, SUBMIT_TOOL_NAME } from "./tools.js";
 
 const DEFAULT_MAX_TURNS = 5;
 const DEFAULT_MAX_TOKENS_PER_TURN = 4096;
@@ -57,6 +58,12 @@ function truncateForHistory(text: string | undefined): string | undefined {
   return `${text.slice(0, MAX_ASSISTANT_TEXT_CHARS_IN_HISTORY)}\n...(생략됨, 원본 ${text.length}자)`;
 }
 
+// 1턴째에 한해 update_plan tool이 있으면 강제 호출시킨다 — 모델이 조사/제출에 앞서
+// 계획부터 세우게 한다. update_plan이 없는 서비스는 항상 undefined라 동작 변화가 없다.
+export function computePlanForceTool(turn: number, tools: AgentTool[]): string | undefined {
+  return turn === 1 && tools.some((t) => t.name === PLAN_TOOL_NAME) ? PLAN_TOOL_NAME : undefined;
+}
+
 async function runTool(
   config: AgentRunConfig,
   call: { id: string; name: string; arguments: string }
@@ -88,7 +95,7 @@ async function tryRescueTurn(
   messages: ToolCallMessage[],
   turns: AgentTurnLog[]
 ): Promise<AgentRunResult | null> {
-  if (!config.tools.some((t) => t.name === "submit_result")) return null;
+  if (!config.tools.some((t) => t.name === SUBMIT_TOOL_NAME)) return null;
 
   logDebug(`[agent-loop] [${config.runLabel}] attempting rescue turn (forceTool=submit_result)`);
   const shrunkMessages = shrinkOldestToolMessages(messages, MAX_HISTORY_CHARS);
@@ -98,7 +105,7 @@ async function tryRescueTurn(
     rescueMessages,
     config.tools,
     config.maxTokensPerTurn ?? DEFAULT_MAX_TOKENS_PER_TURN,
-    "submit_result"
+    SUBMIT_TOOL_NAME
   );
 
   if (step.stopReason === "error") {
@@ -145,7 +152,7 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
     messages = shrinkOldestToolMessages(messages, MAX_HISTORY_CHARS);
     const turnStart = Date.now();
     logDebug(`[agent-loop] [${config.runLabel}] turn ${turn}/${maxTurns} calling model...`);
-    const step = await stepWithTools(config.systemPrompt, messages, config.tools, maxTokens);
+    const step = await stepWithTools(config.systemPrompt, messages, config.tools, maxTokens, computePlanForceTool(turn, config.tools));
     logDebug(
       `[agent-loop] [${config.runLabel}] turn ${turn} model responded elapsedMs=${Date.now() - turnStart} stopReason=${step.stopReason} toolCalls=${step.toolCalls.length}`
     );
