@@ -209,7 +209,7 @@ export async function generateInterviewQuestions(
 
   if (llmAvailable()) {
     try {
-      const raw = await completeJSON<RawItem[]>(SYSTEM_PROMPT, buildUserPrompt(projectSummary, facts), 16000);
+      const raw = await completeJSON<RawItem[]>(SYSTEM_PROMPT, buildUserPrompt(projectSummary, facts), 24000);
       const finalized = finalize(raw, factMap);
       if (finalized.length > 0) return { questions: finalized, mode: "llm" };
     } catch (err) {

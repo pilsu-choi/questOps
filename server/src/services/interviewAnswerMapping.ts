@@ -89,7 +89,7 @@ function heuristicMap(transcript: string, questions: QuestionRef[]): MappedAnswe
 export async function mapTranscriptToAnswers(transcript: string, questions: QuestionRef[]): Promise<MappedAnswer[]> {
   if (llmAvailable()) {
     try {
-      const raw = await completeJSON<MappedAnswer[]>(SYSTEM_PROMPT, buildUserPrompt(transcript, questions), 8192);
+      const raw = await completeJSON<MappedAnswer[]>(SYSTEM_PROMPT, buildUserPrompt(transcript, questions), 16000);
       if (Array.isArray(raw) && raw.length > 0) {
         return raw.filter((r) => r.questionId && r.answerText?.trim());
       }

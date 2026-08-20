@@ -59,11 +59,16 @@ function getAnthropicClient(apiKey: string): Anthropic {
   return c;
 }
 
+// Most Claude models reject a max_tokens above ~8192 unless the extended-output beta
+// header is set for that specific model. OpenRouter/OpenAI/Google are more forgiving
+// (they just cap silently), so only the direct Anthropic path needs this clamp.
+const ANTHROPIC_MAX_TOKENS_CEILING = 8192;
+
 async function completeAnthropic(apiKey: string, model: string, system: string, user: string, maxTokens: number): Promise<string> {
   const c = getAnthropicClient(apiKey);
   const res = await c.messages.create({
     model,
-    max_tokens: maxTokens,
+    max_tokens: Math.min(maxTokens, ANTHROPIC_MAX_TOKENS_CEILING),
     system,
     messages: [{ role: "user", content: user }]
   });

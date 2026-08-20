@@ -112,7 +112,7 @@ export async function analyzeDocument(filename: string, text: string): Promise<D
 
   if (llmAvailable()) {
     try {
-      return await completeJSON<DocumentAnalysis>(SYSTEM_PROMPT, buildUserPrompt(filename, text), 8192);
+      return await completeJSON<DocumentAnalysis>(SYSTEM_PROMPT, buildUserPrompt(filename, text), 16000);
     } catch (err) {
       if (!(err instanceof NoLLMError)) throw err;
     }

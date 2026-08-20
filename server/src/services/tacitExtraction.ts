@@ -66,7 +66,7 @@ function heuristicExtract(answer: string): ExtractedInsights {
 export async function extractInsightsFromAnswer(question: string, answer: string): Promise<{ insights: ExtractedInsights; mode: "llm" | "heuristic" }> {
   if (llmAvailable()) {
     try {
-      const raw = await completeJSON<RawExtract>(SYSTEM_PROMPT, buildUserPrompt(question, answer), 2048);
+      const raw = await completeJSON<RawExtract>(SYSTEM_PROMPT, buildUserPrompt(question, answer), 8000);
       return { insights: normalize(raw), mode: "llm" };
     } catch (err) {
       if (!(err instanceof NoLLMError)) console.error("LLM insight extraction failed, falling back:", err);

@@ -182,7 +182,7 @@ function heuristicGenerate(input: DemoGenerationInput): RawDemo {
 export async function generateAgentDemo(input: DemoGenerationInput): Promise<{ result: RawDemo; mode: "llm" | "heuristic" }> {
   if (llmAvailable()) {
     try {
-      const raw = await completeJSON<RawDemo>(SYSTEM_PROMPT, buildUserPrompt(input), 8192);
+      const raw = await completeJSON<RawDemo>(SYSTEM_PROMPT, buildUserPrompt(input), 16000);
       if (raw?.agent && raw?.screens?.length) return { result: raw, mode: "llm" };
     } catch (err) {
       if (!(err instanceof NoLLMError)) console.error("LLM demo generation failed, falling back:", err);
