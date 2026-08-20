@@ -11,6 +11,8 @@ const DEFAULT_MAX_TOKENS_PER_TURN = 4096;
 // 연속으로 이 횟수만큼 tool 호출 없이 끝나면 maxTurns까지 기다리지 않고 조기 종료한다.
 const MAX_CONSECUTIVE_NO_TOOL_CALL_TURNS = 2;
 
+const MAX_CONSECUTIVE_VALIDATION_FAILURES = 3;
+
 const NO_TOOL_CALL_NUDGE =
   "결과는 반드시 등록된 tool을 호출해서 제출해야 한다. 설명이나 요약을 텍스트로 직접 답하지 말고, 필요한 조사를 마쳤으면 submit_result 툴을 호출하라.";
 
@@ -84,6 +86,7 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
   let messages: ToolCallMessage[] = [{ role: "user", content: config.userPrompt }];
   const turns: AgentTurnLog[] = [];
   let consecutiveNoToolCallTurns = 0;
+  let consecutiveValidationFailures = 0;
   const runStart = Date.now();
 
   logDebug(`[agent-loop] start [${config.runLabel}] maxTurns=${maxTurns} maxTokensPerTurn=${maxTokens} tools=${config.tools.map((t) => t.name).join(",")}`);
@@ -144,7 +147,18 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
       logDebug(
         `[agent-loop] [${config.runLabel}] turn ${turn} tool="${call.name}" elapsedMs=${Date.now() - toolStart} terminate=${Boolean(result.terminate)} result="${result.content.slice(0, 200)}"`
       );
-      messages.push({ role: "tool", toolCallId: call.id, content: result.content });
+
+      let toolResultContent = result.content;
+      if (result.isValidationError) {
+        consecutiveValidationFailures++;
+        if (consecutiveValidationFailures >= 2) {
+          toolResultContent = `(이미 ${consecutiveValidationFailures}회 검증에 실패했다. 스키마 요구사항을 다시 확인하고 신중하게 재제출하라)\n${toolResultContent}`;
+        }
+      } else {
+        consecutiveValidationFailures = 0;
+      }
+
+      messages.push({ role: "tool", toolCallId: call.id, content: toolResultContent });
       turnLog.toolCalls.push({ name: call.name, args: call.arguments, resultSummary: result.content.slice(0, 300) });
       if (result.terminate) {
         terminate = true;
@@ -156,6 +170,16 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
     if (terminate) {
       logDebug(`[agent-loop] [${config.runLabel}] submitted on turn ${turn}, totalElapsedMs=${Date.now() - runStart}`);
       return { runLabel: config.runLabel, status: "submitted", submission, turns };
+    }
+
+    if (consecutiveValidationFailures >= MAX_CONSECUTIVE_VALIDATION_FAILURES) {
+      logDebug(`[agent-loop] [${config.runLabel}] giving up after ${consecutiveValidationFailures} consecutive validation failures`);
+      return {
+        runLabel: config.runLabel,
+        status: "validation_exhausted",
+        turns,
+        error: `submit_result 검증에 ${consecutiveValidationFailures}회 연속 실패해 조기 종료했습니다.`
+      };
     }
   }
 
