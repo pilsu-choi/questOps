@@ -22,6 +22,31 @@ const NO_TOOL_CALL_NUDGE =
 const MAX_ASSISTANT_TEXT_CHARS_IN_HISTORY = 2000;
 const RUNAWAY_RESPONSE_CHARS = 100_000;
 
+// 누적 히스토리가 비정상적으로 커지는 드문 경우(문서가 매우 크거나 모델이 청크를 반복
+// 조회하는 경우)를 위한 하한선. 3~6턴짜리 유한 루프에서는 거의 트리거되지 않을 것으로 예상한다.
+const MAX_HISTORY_CHARS = 120_000;
+
+// 가장 오래된 tool 결과부터 짧은 placeholder로 축소해 누적 히스토리 크기를 임계값 아래로
+// 내린다. 가장 최근 tool 결과는 모델이 방금 조회한 내용이라 절대 축소하지 않는다.
+export function shrinkOldestToolMessages(messages: ToolCallMessage[], maxChars: number): ToolCallMessage[] {
+  if (JSON.stringify(messages).length <= maxChars) return messages;
+
+  const result = messages.map((m) => ({ ...m }));
+  const toolIndexes = result.reduce<number[]>((acc, m, i) => {
+    if (m.role === "tool" && m.content && m.content.length > 0) acc.push(i);
+    return acc;
+  }, []);
+
+  for (let k = 0; k < toolIndexes.length - 1; k++) {
+    if (JSON.stringify(result).length <= maxChars) break;
+    const idx = toolIndexes[k];
+    const original = result[idx].content ?? "";
+    if (original.length <= 50) continue;
+    result[idx] = { ...result[idx], content: `[이전 tool 결과 생략됨, ${original.length}자]` };
+  }
+  return result;
+}
+
 function truncateForHistory(text: string | undefined): string | undefined {
   if (!text || text.length <= MAX_ASSISTANT_TEXT_CHARS_IN_HISTORY) return text;
   return `${text.slice(0, MAX_ASSISTANT_TEXT_CHARS_IN_HISTORY)}\n...(생략됨, 원본 ${text.length}자)`;
@@ -56,7 +81,7 @@ async function runTool(
 export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResult> {
   const maxTurns = config.maxTurns ?? DEFAULT_MAX_TURNS;
   const maxTokens = config.maxTokensPerTurn ?? DEFAULT_MAX_TOKENS_PER_TURN;
-  const messages: ToolCallMessage[] = [{ role: "user", content: config.userPrompt }];
+  let messages: ToolCallMessage[] = [{ role: "user", content: config.userPrompt }];
   const turns: AgentTurnLog[] = [];
   let consecutiveNoToolCallTurns = 0;
   const runStart = Date.now();
@@ -64,6 +89,7 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
   logDebug(`[agent-loop] start [${config.runLabel}] maxTurns=${maxTurns} maxTokensPerTurn=${maxTokens} tools=${config.tools.map((t) => t.name).join(",")}`);
 
   for (let turn = 1; turn <= maxTurns; turn++) {
+    messages = shrinkOldestToolMessages(messages, MAX_HISTORY_CHARS);
     const turnStart = Date.now();
     logDebug(`[agent-loop] [${config.runLabel}] turn ${turn}/${maxTurns} calling model...`);
     const step = await stepWithTools(config.systemPrompt, messages, config.tools, maxTokens);
