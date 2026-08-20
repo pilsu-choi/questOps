@@ -84,11 +84,20 @@ export async function fetchWithRetry(doFetch: () => Promise<Response>): Promise<
       if (res.ok || !isRetryableStatus(res.status) || attempt === MAX_FETCH_ATTEMPTS - 1) {
         return { res };
       }
+      const backoffMs = computeBackoffMs(attempt);
+      logDebug(
+        `[llm][toolCalling] retry attempt=${attempt + 1}/${MAX_FETCH_ATTEMPTS} waitMs=${backoffMs} reason=status:${res.status}`
+      );
+      await sleep(backoffMs);
     } catch (err) {
       lastErrorMessage = (err as Error).message;
       if (attempt === MAX_FETCH_ATTEMPTS - 1) return { errorMessage: lastErrorMessage };
+      const backoffMs = computeBackoffMs(attempt);
+      logDebug(
+        `[llm][toolCalling] retry attempt=${attempt + 1}/${MAX_FETCH_ATTEMPTS} waitMs=${backoffMs} reason=${lastErrorMessage}`
+      );
+      await sleep(backoffMs);
     }
-    await sleep(computeBackoffMs(attempt));
   }
   return { errorMessage: lastErrorMessage || "알 수 없는 오류" };
 }

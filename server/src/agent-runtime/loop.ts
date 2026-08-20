@@ -91,7 +91,8 @@ async function tryRescueTurn(
   if (!config.tools.some((t) => t.name === "submit_result")) return null;
 
   logDebug(`[agent-loop] [${config.runLabel}] attempting rescue turn (forceTool=submit_result)`);
-  const rescueMessages: ToolCallMessage[] = [...messages, { role: "user", content: RESCUE_NUDGE }];
+  const shrunkMessages = shrinkOldestToolMessages(messages, MAX_HISTORY_CHARS);
+  const rescueMessages: ToolCallMessage[] = [...shrunkMessages, { role: "user", content: RESCUE_NUDGE }];
   const step = await stepWithTools(
     config.systemPrompt,
     rescueMessages,
@@ -100,7 +101,11 @@ async function tryRescueTurn(
     "submit_result"
   );
 
-  if (step.stopReason === "error" || step.toolCalls.length === 0) {
+  if (step.stopReason === "error") {
+    logDebug(`[agent-loop] [${config.runLabel}] rescue turn failed: ${step.errorMessage}`);
+    return null;
+  }
+  if (step.toolCalls.length === 0) {
     logDebug(`[agent-loop] [${config.runLabel}] rescue turn produced no tool call, giving up`);
     return null;
   }
