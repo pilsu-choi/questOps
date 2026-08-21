@@ -12,7 +12,8 @@ import {
   ChevronUp,
   Sparkles,
   BookOpen,
-  AlertTriangle
+  AlertTriangle,
+  CircleDashed
 } from "lucide-react";
 import { api } from "../api/client";
 import type { ProjectDocument, DocumentStatus } from "../types";
@@ -49,6 +50,7 @@ export default function DocumentsAnalysis() {
   const navigate = useNavigate();
   const toast = useToast();
   const [docs, setDocs] = useState<ProjectDocument[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -58,9 +60,15 @@ export default function DocumentsAnalysis() {
   const pollRef = useRef<number | null>(null);
 
   const load = useCallback(async () => {
-    const rows = await api.listDocuments(project.id);
-    setDocs(rows);
-    return rows;
+    try {
+      const rows = await api.listDocuments(project.id);
+      setDocs(rows);
+      setLoadError(null);
+      return rows;
+    } catch (err) {
+      setLoadError((err as Error).message || "문서 목록을 불러오지 못했습니다.");
+      return null;
+    }
   }, [project.id]);
 
   useEffect(() => {
@@ -208,7 +216,18 @@ export default function DocumentsAnalysis() {
         </Button>
       </Card>
 
-      {docs === null && (
+      {loadError && (
+        <div className="mb-7 flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-600">
+          <div className="flex items-center gap-1.5">
+            <AlertTriangle size={14} /> 문서 목록을 불러오지 못했습니다: {loadError}
+          </div>
+          <Button variant="secondary" onClick={() => load()}>
+            다시 시도
+          </Button>
+        </div>
+      )}
+
+      {docs === null && !loadError && (
         <div className="flex justify-center py-16">
           <Loader2 className="animate-spin text-accent-500" size={20} />
         </div>
@@ -299,7 +318,11 @@ export default function DocumentsAnalysis() {
           </div>
           <div className="flex flex-wrap gap-x-6 gap-y-2 text-[13px]">
             <StatusPill icon={<CheckCircle2 size={13} />} color="text-accent-700" label={`분석완료 ${analyzedCount}`} />
-            <StatusPill icon={<Loader2 size={13} className="animate-spin" />} color="text-slate-500" label={`진행중 ${analyzingCount}`} />
+            <StatusPill
+              icon={analyzingCount > 0 ? <Loader2 size={13} className="animate-spin" /> : <CircleDashed size={13} />}
+              color="text-slate-500"
+              label={`진행중 ${analyzingCount}`}
+            />
             <StatusPill icon={<XCircle size={13} />} color="text-red-500" label={`실패 ${failedCount}`} />
           </div>
         </>
