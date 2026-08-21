@@ -1,8 +1,11 @@
 import { z } from "zod";
+import { nanoid } from "nanoid";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
 import { toolCallingAvailable } from "../llm/toolCalling.js";
-import { runAgentLoop } from "../agent-runtime/loop.js";
-import { createSubmitTool } from "../agent-runtime/tools.js";
+import { runFanOutAgents } from "../agent-runtime/fanOut.js";
+import { createSubmitTool, createPlanTool } from "../agent-runtime/tools.js";
+import { createScratchWorkspaceTools, cleanupScratchWorkspace } from "../agent-runtime/scratchTools.js";
+import { createProjectDocumentTools } from "../agent-runtime/projectDocumentTools.js";
 import { saveAgentRunLog } from "../agent-runtime/log.js";
 import type { EvidenceRef, InterviewQuestionItem } from "../types.js";
 import { buildGroundedFacts, factSheetText, type DocInput, type GroundedFact } from "./factExtraction.js";
@@ -58,14 +61,17 @@ JSON 배열만 출력하라. 형식:
   }
 ]`;
 
-function buildUserPrompt(projectSummary: string, facts: GroundedFact[]): string {
+function buildUserPrompt(projectSummary: string, facts: GroundedFact[], categoryFilter?: string): string {
+  const scope = categoryFilter
+    ? `\n\n이번 요청에서는 category="${categoryFilter}" 인 질문만 생성한다. 다른 카테고리는 생성하지 않는다. 목표 개수는 5~8개이며, 근거가 부족하면 억지로 채우지 않는다.`
+    : "";
   return `프로젝트 개요:
 ${projectSummary}
 
 Grounded Fact Sheet (아래 Fact ID만 evidence로 인용 가능):
 ${factSheetText(facts)}
 
-위 Fact들을 근거로 1차 인터뷰 질의서를 JSON 배열로 생성하라.`;
+위 Fact들을 근거로 1차 인터뷰 질의서를 JSON 배열로 생성하라.${scope}`;
 }
 
 interface RawItem {
@@ -215,29 +221,75 @@ function heuristicGenerate(facts: GroundedFact[]): RawItem[] {
   });
 }
 
-async function generateInterviewQuestionsAgentic(projectSummary: string, facts: GroundedFact[]): Promise<RawItem[]> {
+// 카테고리별 fan-out 서브에이전트에 부여할 턴/토큰 예산. 통짜 생성(6턴/8000토큰)과 달리
+// 카테고리 하나당 목표 문항이 5~8개로 좁아지므로 더 적은 예산으로 충분하다.
+const CATEGORY_FANOUT_MAX_TURNS = 4;
+const CATEGORY_FANOUT_MAX_TOKENS = 6000;
+
+// 6개 카테고리(BASE_CATEGORIES)를 통짜 대화 하나로 생성하던 것을 카테고리별 독립 서브에이전트로
+// 병렬 실행한다. 모든 서브에이전트가 동일한 SYSTEM_PROMPT와 동일한 Grounded Fact Sheet를 공유하므로
+// 문체/근거 규칙/tacitKnowledgeType 정의가 카테고리 간에 갈라지지 않는다 - 갈리는 지점은 "어떤
+// 카테고리를 생성할지"뿐이라 그 부분만 user prompt로 명시하고, 혹시 모델이 지시를 무시하고 다른
+// 카테고리를 섞어 내더라도 결과를 병합할 때 코드 레벨로 한 번 더 필터링해 강제한다.
+async function generateInterviewQuestionsAgentic(projectSummary: string, facts: GroundedFact[], projectId: string): Promise<RawItem[]> {
   const submitTool = createSubmitTool(InterviewQuestionsOutputSchema, "1차 인터뷰 질의서를 제출한다.");
+  const projectDocTools = createProjectDocumentTools(projectId);
+  const runIds: string[] = [];
 
-  const result = await runAgentLoop({
-    runLabel: "interviewGeneration",
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: `${buildUserPrompt(projectSummary, facts)}\n\n작성이 끝나면 submit_result 툴을 호출해 questions 배열을 제출하라.`,
-    tools: [submitTool],
-    maxTurns: 4,
-    maxTokensPerTurn: 8000
-  });
+  try {
+    const tasks = BASE_CATEGORIES.map((category) => {
+      const runId = nanoid(12);
+      runIds.push(runId);
+      const planTool = createPlanTool(runId);
+      const scratchTools = createScratchWorkspaceTools(runId);
+      return {
+        runLabel: `interviewGeneration:${category}`,
+        systemPrompt: SYSTEM_PROMPT,
+        userPrompt: `${buildUserPrompt(projectSummary, facts, category)}\n\nFact Sheet만으로 부족하면 list_project_documents/read_project_document_chunk로 원문을 직접 확인할 수 있다.\n제출 전에 질문 초안을 write_scratch_file로 저장하고 다시 읽어 다듬을 수 있다.\n작성이 끝나면 submit_result 툴을 호출해 questions 배열을 제출하라.`,
+        tools: [planTool, ...scratchTools, ...projectDocTools, submitTool],
+        maxTurns: CATEGORY_FANOUT_MAX_TURNS,
+        maxTokensPerTurn: CATEGORY_FANOUT_MAX_TOKENS
+      };
+    });
 
-  saveAgentRunLog(result);
+    const results = await runFanOutAgents(tasks);
+    results.forEach((r) => saveAgentRunLog(r));
 
-  if (result.status === "submitted" && result.submission) {
-    return (result.submission as { questions: RawItem[] }).questions;
+    const merged: RawItem[] = [];
+    results.forEach((result, i) => {
+      const category = BASE_CATEGORIES[i];
+      if (result.status === "submitted" && result.submission) {
+        const items = (result.submission as { questions: RawItem[] }).questions;
+        // 모델이 카테고리 제한을 무시했을 경우를 대비한 코드 레벨 이중 강제.
+        const scoped = items.filter((it) => it.category?.trim().toLowerCase() === category.toLowerCase());
+        merged.push(...scoped);
+      } else {
+        logError(`interviewGeneration fan-out 실패: category=${category} status=${result.status} ${result.error ?? ""}`);
+      }
+    });
+
+    if (merged.length === 0) {
+      throw new Error("인터뷰 질의서 fan-out이 모든 카테고리에서 결과를 제출하지 못했습니다.");
+    }
+
+    // 카테고리별로 독립 생성된 결과라 동일 Fact를 서로 다른 카테고리에서 비슷하게 질문했을 가능성이
+    // 있어, 병합 시점에 정규화된 질문 텍스트 기준으로 중복을 제거한다.
+    const seen = new Set<string>();
+    return merged.filter((it) => {
+      const key = it.question.trim().replace(/\s+/g, " ").toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  } finally {
+    for (const runId of runIds) cleanupScratchWorkspace(runId);
   }
-  throw new Error(`인터뷰 질의서 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
 }
 
 export async function generateInterviewQuestions(
   projectSummary: string,
-  docs: DocInput[]
+  docs: DocInput[],
+  projectId: string
 ): Promise<{ questions: InterviewQuestionItem[]; mode: "llm" | "heuristic" }> {
   const overallStart = Date.now();
   const facts = buildGroundedFacts(docs);
@@ -253,7 +305,7 @@ export async function generateInterviewQuestions(
     if (toolCallingAvailable()) {
       logDebug(`[interviewGeneration] attempting agentic path`);
       try {
-        const raw = await generateInterviewQuestionsAgentic(projectSummary, facts);
+        const raw = await generateInterviewQuestionsAgentic(projectSummary, facts, projectId);
         const finalized = finalize(raw, factMap);
         logDebug(`[interviewGeneration] agentic path returned ${finalized.length} questions, totalElapsedMs=${Date.now() - overallStart}`);
         if (finalized.length > 0) return { questions: finalized, mode: "llm" };

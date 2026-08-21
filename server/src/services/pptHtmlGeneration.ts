@@ -85,6 +85,7 @@ export function renderPresentationHtml(meta: { projectName: string; client: stri
   body{font-family:"Noto Sans KR","Pretendard",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;background:#1E293B;color:var(--text);overflow:hidden}
   .stage{position:relative;width:100vw;height:100vh;display:flex;align-items:center;justify-content:center}
   .slide{position:absolute;inset:0;background:#fff;display:flex;flex-direction:column;padding:0}
+  .slide[hidden]{display:none}
   .slide.dark-slide{background:var(--navy)}
   .slide-inner{flex:1;padding:64px 80px;display:flex;flex-direction:column;justify-content:center;overflow:auto}
   .slide h1{font-size:40px;font-weight:800;margin:0 0 12px;color:inherit}

@@ -119,7 +119,7 @@ interviewRouter.post("/projects/:id/interview/generate", async (req, res) => {
       analysis: JSON.parse(d.analysis_result)
     }));
     const projectSummary = `${project.name} (${project.client}) — ${project.description || ""} 목표: ${project.goal || ""}`;
-    const { questions, mode } = await generateInterviewQuestions(projectSummary, docInputs);
+    const { questions, mode } = await generateInterviewQuestions(projectSummary, docInputs, projectId);
 
     if (questions.length === 0) {
       db.prepare("UPDATE interview_sets SET status = 'error', error_message = ?, updated_at = ? WHERE id = ?").run(
@@ -257,7 +257,7 @@ async function saveAnswerForQuestion(
   const existing = db.prepare("SELECT * FROM interview_answers WHERE question_id = ?").get(question.id) as any;
   const now = new Date().toISOString();
 
-  const { insights, mode } = await extractInsightsFromAnswer(question.question, answerText);
+  const { insights, mode } = await extractInsightsFromAnswer(question.question, answerText, question.project_id);
 
   if (existing) {
     db.prepare(
@@ -330,7 +330,8 @@ interviewRouter.post("/projects/:id/interview/answers/upload", answerUpload.sing
 
     const mapped = await mapTranscriptToAnswers(
       transcript,
-      questions.map((q) => ({ id: q.id, question: q.question, category: q.category }))
+      questions.map((q) => ({ id: q.id, question: q.question, category: q.category })),
+      projectId
     );
 
     const results: { questionId: string; saved: boolean }[] = [];

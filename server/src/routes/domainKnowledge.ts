@@ -57,6 +57,7 @@ domainKnowledgeRouter.post("/projects/:id/domain-knowledge/generate", async (req
     const analyses = analyzedDocs.map((d) => JSON.parse(d.analysis_result));
 
     const { result } = await generateDomainKnowledge({
+      projectId,
       projectName: project.name,
       client: project.client,
       org: project.org || undefined,

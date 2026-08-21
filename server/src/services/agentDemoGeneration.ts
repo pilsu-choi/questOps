@@ -1,13 +1,18 @@
 import { z } from "zod";
+import { nanoid } from "nanoid";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
 import { toolCallingAvailable } from "../llm/toolCalling.js";
 import { runAgentLoop } from "../agent-runtime/loop.js";
-import { createSubmitTool } from "../agent-runtime/tools.js";
+import { runFanOutAgents } from "../agent-runtime/fanOut.js";
+import { createSubmitTool, createPlanTool } from "../agent-runtime/tools.js";
+import { createScratchWorkspaceTools, cleanupScratchWorkspace } from "../agent-runtime/scratchTools.js";
+import { createProjectDocumentTools } from "../agent-runtime/projectDocumentTools.js";
 import { saveAgentRunLog } from "../agent-runtime/log.js";
 import type { AgentConcept, DemoScreen, DemoScenario, DocumentAnalysis, InterviewQuestionItem } from "../types.js";
 import { logDebug, logError } from "../logger.js";
 
 export interface DemoGenerationInput {
+  projectId: string;
   projectName: string;
   client: string;
   description: string;
@@ -22,7 +27,7 @@ const SYSTEM_PROMPT = `당신은 AI Agent 설계를 담당하는 Principal AI So
 반드시 제공된 자료의 실제 업무 용어, 조직명, 시스템명, 규칙을 사용하고 절대 "AI Assistant", "Chatbot" 같은 범용적인 이름/설명을 만들지 않는다.
 Human-in-the-loop 지점을 명확히 표시한다.`;
 
-function buildUserPrompt(input: DemoGenerationInput): string {
+function buildContext(input: DemoGenerationInput): string {
   const analysisText = input.analyses
     .map(
       (a, i) =>
@@ -47,7 +52,11 @@ ${analysisText || "(없음)"}
 ${qaText || "(없음)"}
 
 --- 추출된 Tacit Knowledge ---
-${tacitText || "(없음)"}
+${tacitText || "(없음)"}`;
+}
+
+function buildUserPrompt(input: DemoGenerationInput): string {
+  return `${buildContext(input)}
 
 위 내용을 근거로 다음 JSON을 생성하라:
 {
@@ -239,24 +248,155 @@ function heuristicGenerate(input: DemoGenerationInput): RawDemo {
   return { agent, screens, scenario };
 }
 
+// agent 컨셉을 먼저 생성해 나머지 서브에이전트가 공유하는 고정 컨텍스트로 삼는다(그라운딩).
+// 화면 4개(input/analysis/decision/monitor)와 시나리오가 서로 다른 Agent 이름/목적/규칙을
+// 상상해내는 것을 막기 위함이다 - 이 단계가 없으면 각 서브에이전트가 독립적으로 Agent를
+// 추론해 이름이나 workflow가 갈릴 위험이 있다.
+function buildAgentOnlyPrompt(input: DemoGenerationInput): string {
+  return `${buildContext(input)}
+
+위 내용을 근거로 AI Agent 컨셉만 다음 JSON 형식으로 생성하라 (화면/시나리오는 이번 요청에 포함하지 않는다):
+{
+  "name": "실제 업무 맥락을 반영한 Agent 이름",
+  "purpose": "Agent의 목적 (2-3문장)",
+  "users": ["실제 사용자/조직"],
+  "input": ["Agent가 받는 입력 데이터/문서"],
+  "workflow": [
+    { "order": 1, "name": "단계명", "description": "설명", "actor": "agent|human|system", "criteria": ["판단 기준"] }
+  ],
+  "rules": ["Agent가 적용하는 실제 Business Rule / Tacit Rule"],
+  "exceptions": ["Agent가 인지해야 하는 예외 상황"],
+  "dataSources": ["연동 시스템/데이터"],
+  "humanApproval": { "required": true, "points": ["사람이 반드시 확인해야 하는 지점"] },
+  "output": ["Agent의 최종 산출물/액션"]
+}
+반드시 제공된 자료의 실제 업무 용어, 조직명, 시스템명, 규칙을 사용하고 절대 "AI Assistant", "Chatbot" 같은 범용적인 이름/설명을 만들지 않는다.
+Human-in-the-loop 지점을 명확히 표시한다. JSON만 출력.`;
+}
+
+const SCREEN_KIND_ORDER: DemoScreen["kind"][] = ["input", "analysis", "decision", "monitor"];
+
+const SCREEN_KIND_HINTS: Record<DemoScreen["kind"], string> = {
+  input: "사용자 입력/접수 화면 - 처리 대상 건의 정보를 사용자가 입력/접수하는 화면",
+  analysis: "AI 판단·근거 화면 - Business Rule 검토 및 예외 탐지 등 AI의 1차 분석 결과와 근거를 보여주는 화면",
+  decision: "사람 승인/반려 화면 - AI 판단 결과에 대해 담당자가 최종 승인/반려를 결정하는 화면",
+  monitor: "처리 현황 모니터링 화면 - 전체 처리 건의 현황과 감사 로그를 보여주는 화면"
+};
+
+function buildScreenPrompt(input: DemoGenerationInput, agent: AgentConcept, kind: DemoScreen["kind"]): string {
+  return `${buildContext(input)}
+
+--- 이미 설계된 AI Agent 컨셉 (아래 내용과 일치하도록 화면을 설계하라) ---
+${JSON.stringify(agent, null, 2)}
+
+이번 요청에서는 kind="${kind}" 화면 하나만 설계한다 (다른 kind는 만들지 않는다). ${SCREEN_KIND_HINTS[kind]}
+다음 JSON 하나만 생성하라:
+{
+  "id": "${kind}",
+  "kind": "${kind}",
+  "title": "화면 제목 (실제 업무 용어 사용)",
+  "description": "설명",
+  "status": "confirmed|ai_inferred|need_confirmation",
+  "mockData": { "설명 목적의 key-value 쌍": "실제 업무 맥락을 반영한 realistic mock 값" }
+}
+JSON만 출력.`;
+}
+
+function buildScenarioPrompt(input: DemoGenerationInput, agent: AgentConcept): string {
+  return `${buildContext(input)}
+
+--- 이미 설계된 AI Agent 컨셉 (아래 내용을 그대로 사용해 시나리오를 설계하라) ---
+${JSON.stringify(agent, null, 2)}
+
+이번 요청에서는 이 Agent가 처리하는 대표 Demo 시나리오 하나만 설계한다.
+다음 JSON 하나만 생성하라:
+{
+  "caseId": "실제 업무에서 쓸 법한 케이스 번호 형식",
+  "agentName": "${agent.name}",
+  "steps": [{ "label": "단계", "status": "pass|warn|fail", "detail": "설명" }],
+  "decision": { "outcome": "approve|review_required|reject", "reason": "판단 근거", "confidence": 0.0 }
+}
+JSON만 출력.`;
+}
+
 async function generateAgentDemoAgentic(input: DemoGenerationInput): Promise<RawDemo> {
-  const submitTool = createSubmitTool(RawDemoSchema, "Agent 컨셉과 Demo 화면/시나리오를 제출한다.");
+  const runIds: string[] = [];
 
-  const result = await runAgentLoop({
-    runLabel: "agentDemoGeneration",
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: `${buildUserPrompt(input)}\n\n설계가 끝나면 submit_result 툴을 호출해 제출하라.`,
-    tools: [submitTool],
-    maxTurns: 6,
-    maxTokensPerTurn: 8000
-  });
+  try {
+    const agentRunId = nanoid(12);
+    runIds.push(agentRunId);
+    const agentResult = await runAgentLoop({
+      runLabel: "agentDemoGeneration:agent",
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: `${buildAgentOnlyPrompt(input)}\n\n요약만으로 부족하면 list_project_documents/read_project_document_chunk로 원문을 직접 확인할 수 있다.\n설계가 끝나면 submit_result 툴을 호출해 제출하라.`,
+      tools: [
+        createPlanTool(agentRunId),
+        ...createScratchWorkspaceTools(agentRunId),
+        ...createProjectDocumentTools(input.projectId),
+        createSubmitTool(AgentConceptSchema, "AI Agent 컨셉을 제출한다.")
+      ],
+      maxTurns: 5,
+      maxTokensPerTurn: 5000
+    });
+    saveAgentRunLog(agentResult);
+    if (agentResult.status !== "submitted" || !agentResult.submission) {
+      throw new Error(`Agent 컨셉 생성이 실패했습니다 (status=${agentResult.status}). ${agentResult.error ?? ""}`.trim());
+    }
+    const agent = agentResult.submission as AgentConcept;
 
-  saveAgentRunLog(result);
+    const screenTasks = SCREEN_KIND_ORDER.map((kind) => {
+      const runId = nanoid(12);
+      runIds.push(runId);
+      return {
+        runLabel: `agentDemoGeneration:screen:${kind}`,
+        systemPrompt: SYSTEM_PROMPT,
+        userPrompt: `${buildScreenPrompt(input, agent, kind)}\n\n설계가 끝나면 submit_result 툴을 호출해 제출하라.`,
+        tools: [
+          createPlanTool(runId),
+          ...createScratchWorkspaceTools(runId),
+          ...createProjectDocumentTools(input.projectId),
+          createSubmitTool(DemoScreenSchema, "Demo 화면 하나를 제출한다.")
+        ],
+        maxTurns: 4,
+        maxTokensPerTurn: 4000
+      };
+    });
 
-  if (result.status === "submitted" && result.submission) {
-    return result.submission as RawDemo;
+    const scenarioRunId = nanoid(12);
+    runIds.push(scenarioRunId);
+    const scenarioTask = {
+      runLabel: "agentDemoGeneration:scenario",
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: `${buildScenarioPrompt(input, agent)}\n\n설계가 끝나면 submit_result 툴을 호출해 제출하라.`,
+      tools: [
+        createPlanTool(scenarioRunId),
+        ...createScratchWorkspaceTools(scenarioRunId),
+        ...createProjectDocumentTools(input.projectId),
+        createSubmitTool(DemoScenarioSchema, "Demo 시나리오를 제출한다.")
+      ],
+      maxTurns: 4,
+      maxTokensPerTurn: 4000
+    };
+
+    // screenTasks가 SCREEN_KIND_ORDER 순서대로 배열돼 있고, runFanOutAgents는 완료 순서와
+    // 무관하게 입력 인덱스 순서로 결과를 반환하므로 슬라이스만으로 kind별 결과를 안전하게 뽑을 수 있다.
+    const results = await runFanOutAgents([...screenTasks, scenarioTask]);
+    results.forEach((r) => saveAgentRunLog(r));
+
+    const failed = results.find((r) => r.status !== "submitted" || !r.submission);
+    if (failed) {
+      throw new Error(
+        `Demo 화면/시나리오 fan-out 중 일부가 실패했습니다 (${failed.runLabel} status=${failed.status}). ${failed.error ?? ""}`.trim()
+      );
+    }
+
+    const screens = results.slice(0, SCREEN_KIND_ORDER.length).map((r) => r.submission as DemoScreen);
+    const scenario = results[results.length - 1].submission as DemoScenario;
+
+    return { agent, screens, scenario };
+  } finally {
+    for (const runId of runIds) cleanupScratchWorkspace(runId);
   }
-  throw new Error(`Demo 생성 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
 }
 
 export async function generateAgentDemo(input: DemoGenerationInput): Promise<{ result: RawDemo; mode: "llm" | "heuristic" }> {

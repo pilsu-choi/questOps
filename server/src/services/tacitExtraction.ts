@@ -1,8 +1,11 @@
 import { z } from "zod";
+import { nanoid } from "nanoid";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
 import { toolCallingAvailable } from "../llm/toolCalling.js";
 import { runAgentLoop } from "../agent-runtime/loop.js";
-import { createSubmitTool } from "../agent-runtime/tools.js";
+import { createSubmitTool, createPlanTool } from "../agent-runtime/tools.js";
+import { createScratchWorkspaceTools, cleanupScratchWorkspace } from "../agent-runtime/scratchTools.js";
+import { createProjectDocumentTools } from "../agent-runtime/projectDocumentTools.js";
 import { saveAgentRunLog } from "../agent-runtime/log.js";
 import type { ExtractedInsights } from "../types.js";
 import { splitSentences, matchLines } from "./textUtils.js";
@@ -79,27 +82,35 @@ function heuristicExtract(answer: string): ExtractedInsights {
   };
 }
 
-async function extractInsightsAgentic(question: string, answer: string): Promise<RawExtract> {
+async function extractInsightsAgentic(question: string, answer: string, projectId: string): Promise<RawExtract> {
   const submitTool = createSubmitTool(RawExtractSchema, "추출된 암묵지 항목을 제출한다.");
+  const runId = nanoid(12);
+  const planTool = createPlanTool(runId);
+  const scratchTools = createScratchWorkspaceTools(runId);
+  const projectDocTools = createProjectDocumentTools(projectId);
 
-  const result = await runAgentLoop({
-    runLabel: "tacitExtraction",
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: `${buildUserPrompt(question, answer)}\n\n추출이 끝나면 submit_result 툴을 호출해 제출하라.`,
-    tools: [submitTool],
-    maxTurns: 3,
-    maxTokensPerTurn: 2048
-  });
+  try {
+    const result = await runAgentLoop({
+      runLabel: "tacitExtraction",
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: `${buildUserPrompt(question, answer)}\n\n답변만으로 판단이 애매하면 list_project_documents/read_project_document_chunk로 관련 문서를 참고할 수 있다.\n추출이 끝나면 submit_result 툴을 호출해 제출하라.`,
+      tools: [planTool, ...scratchTools, ...projectDocTools, submitTool],
+      maxTurns: 5,
+      maxTokensPerTurn: 2048
+    });
 
-  saveAgentRunLog(result);
+    saveAgentRunLog(result);
 
-  if (result.status === "submitted" && result.submission) {
-    return result.submission as RawExtract;
+    if (result.status === "submitted" && result.submission) {
+      return result.submission as RawExtract;
+    }
+    throw new Error(`암묵지 추출 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
+  } finally {
+    cleanupScratchWorkspace(runId);
   }
-  throw new Error(`암묵지 추출 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
 }
 
-export async function extractInsightsFromAnswer(question: string, answer: string): Promise<{ insights: ExtractedInsights; mode: "llm" | "heuristic" }> {
+export async function extractInsightsFromAnswer(question: string, answer: string, projectId: string): Promise<{ insights: ExtractedInsights; mode: "llm" | "heuristic" }> {
   const overallStart = Date.now();
   logDebug(`[tacitExtraction] start questionChars=${question.length} answerChars=${answer.length}`);
 
@@ -107,7 +118,7 @@ export async function extractInsightsFromAnswer(question: string, answer: string
     if (toolCallingAvailable()) {
       logDebug(`[tacitExtraction] attempting agentic path`);
       try {
-        const raw = await extractInsightsAgentic(question, answer);
+        const raw = await extractInsightsAgentic(question, answer, projectId);
         logDebug(`[tacitExtraction] agentic path succeeded, totalElapsedMs=${Date.now() - overallStart}`);
         return { insights: normalize(raw), mode: "llm" };
       } catch (err) {

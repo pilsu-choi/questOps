@@ -107,6 +107,7 @@ demoRouter.post("/projects/:id/demo/generate", async (req, res) => {
     const tacitRows = db.prepare("SELECT type, description FROM tacit_knowledge WHERE project_id = ?").all(projectId) as any[];
 
     const { result } = await generateAgentDemo({
+      projectId,
       projectName: project.name,
       client: project.client,
       description: project.description || "",

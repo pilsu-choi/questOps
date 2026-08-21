@@ -2,14 +2,14 @@ import { z } from "zod";
 import { nanoid } from "nanoid";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
 import { toolCallingAvailable } from "../llm/toolCalling.js";
-import { runAgentLoop } from "../agent-runtime/loop.js";
+import { runFanOutAgents } from "../agent-runtime/fanOut.js";
 import { createSubmitTool, createReadTextChunkTool, createPlanTool } from "../agent-runtime/tools.js";
 import { createScratchWorkspaceTools, cleanupScratchWorkspace } from "../agent-runtime/scratchTools.js";
 import { createProjectDocumentTools } from "../agent-runtime/projectDocumentTools.js";
 import { saveAgentRunLog } from "../agent-runtime/log.js";
 import { logDebug, logError } from "../logger.js";
 import type { DocumentAnalysis } from "../types.js";
-import { splitSentences, matchLines } from "./textUtils.js";
+import { splitSentences, matchLines, buildDocumentOutline } from "./textUtils.js";
 
 const DocumentAnalysisSchema = z.object({
   businessContext: z.string().min(1, "businessContext는 비어 있을 수 없다"),
@@ -116,48 +116,126 @@ function heuristicAnalysis(filename: string, text: string): DocumentAnalysis {
   };
 }
 
+// 10개 출력 필드를 한 대화에서 최대 8턴에 걸쳐 채우던 것을, 서로 겹치지 않는 필드 그룹
+// 3개로 나눠 병렬 서브에이전트로 분석한다. 각 서브에이전트는 같은 문서 원문(preview/outline/
+// read_document_chunk)을 독립적으로 읽지만, 스코프가 좁아진 만큼 턴 수는 8→5로 줄어든다.
+// 필드가 서로 겹치지 않아 병합은 단순 객체 스프레드로 끝나고, 한 그룹이라도 실패하면
+// (필드가 모두 필수라 부분 채움이 무의미) 즉시 throw해 상위 폴백(completeJSON)으로 넘긴다.
+const ContextGroupSchema = DocumentAnalysisSchema.pick({
+  businessContext: true,
+  keyUsers: true,
+  process: true,
+  systems: true
+});
+const RulesDecisionsGroupSchema = DocumentAnalysisSchema.pick({
+  businessRules: true,
+  decisionPoints: true,
+  exceptions: true
+});
+const PainpointsAiUnknownsGroupSchema = DocumentAnalysisSchema.pick({
+  painPoints: true,
+  aiOpportunities: true,
+  unknowns: true
+});
+
+interface AnalysisFieldGroup {
+  key: string;
+  schema: z.ZodTypeAny;
+  fieldsGuide: string;
+}
+
+const ANALYSIS_FIELD_GROUPS: AnalysisFieldGroup[] = [
+  {
+    key: "context",
+    schema: ContextGroupSchema,
+    fieldsGuide: `{
+  "businessContext": "이 문서가 다루는 업무/사업의 배경과 목적 (2-4문장)",
+  "keyUsers": ["문서에 언급된 실제 조직/역할/담당자"],
+  "process": ["문서에 나타난 업무 처리 단계, 순서대로"],
+  "systems": ["문서에 언급된 시스템/솔루션/연동 대상"]
+}`
+  },
+  {
+    key: "rules_decisions",
+    schema: RulesDecisionsGroupSchema,
+    fieldsGuide: `{
+  "businessRules": ["문서에 명시된 구체적 규정, 기준, 수치, 한도"],
+  "decisionPoints": ["담당자가 판단/승인/검토해야 하는 지점"],
+  "exceptions": ["문서에 언급된 예외 상황, 특이 케이스"]
+}`
+  },
+  {
+    key: "painpoints_ai_unknowns",
+    schema: PainpointsAiUnknownsGroupSchema,
+    fieldsGuide: `{
+  "painPoints": ["문서에서 드러나는 문제점, 비효율, 병목"],
+  "aiOpportunities": ["이 업무에서 AI Agent가 자동화하거나 보조할 수 있는 구체적 후보"],
+  "unknowns": ["문서만으로는 판단 기준/예외 처리 방식이 불명확하여 인터뷰로 확인이 필요한 항목"]
+}`
+  }
+];
+
+function buildDocPreamble(filename: string, text: string, outline: string | undefined): string {
+  const preview = text.slice(0, 2000);
+  return `문서 파일명: ${filename}
+문서 총 길이: ${text.length}자
+${outline ? `\n--- 문서 구조 요약 (자동 추출) ---\n${outline}\n--- 구조 요약 끝 ---\n` : ""}
+--- 문서 미리보기 (앞부분) ---
+${preview}
+--- 미리보기 끝 ---`;
+}
+
 // 문서 분석은 후속 4단계(질의서/답변매핑/암묵지/Demo UI)가 전부 이 출력을 근거로
 // 삼는 최상류 단계라, 단발성 completeJSON 대신 agent-runtime 위에서 먼저 시험한다.
 // tool-calling을 지원하는 provider(현재는 OpenRouter)로 설정돼 있을 때만 이 경로를
 // 타고, 그 외에는 아래 completeJSON 단일 턴 경로로 그대로 폴백한다.
 async function analyzeDocumentAgentic(filename: string, text: string, projectId: string): Promise<DocumentAnalysis> {
-  const preview = text.slice(0, 2000);
-  const readChunkTool = createReadTextChunkTool("read_document_chunk", "문서 원문을 청크 단위로 읽는다.", text);
-  const submitTool = createSubmitTool(DocumentAnalysisSchema, "문서 분석 결과를 제출한다.");
-  const planTool = createPlanTool();
-  const runId = nanoid(12);
-  const scratchTools = createScratchWorkspaceTools(runId);
-  const projectDocTools = createProjectDocumentTools(projectId);
+  const outline = buildDocumentOutline(text);
+  const preamble = buildDocPreamble(filename, text, outline);
+  const runIds: string[] = [];
 
   try {
-    const result = await runAgentLoop({
-      runLabel: "documentAnalysis",
-      systemPrompt: SYSTEM_PROMPT,
-      userPrompt: `문서 파일명: ${filename}
-문서 총 길이: ${text.length}자
+    const tasks = ANALYSIS_FIELD_GROUPS.map((group) => {
+      const runId = nanoid(12);
+      runIds.push(runId);
+      const readChunkTool = createReadTextChunkTool("read_document_chunk", "문서 원문을 청크 단위로 읽는다.", text);
+      return {
+        runLabel: `documentAnalysis:${group.key}`,
+        systemPrompt: SYSTEM_PROMPT,
+        userPrompt: `${preamble}
 
---- 문서 미리보기 (앞부분) ---
-${preview}
---- 미리보기 끝 ---
-
-미리보기만으로 분석이 충분하지 않으면 read_document_chunk 툴로 필요한 구간을 더 읽어라.
+구조 요약에 "(offset=N)"이 있으면 read_document_chunk({ offset: N })로 궁금한 구간에 바로 찾아갈 수 있다. 그렇지 않고 미리보기만으로 분석이 충분하지 않으면 offset=0부터 순서대로 read_document_chunk 툴로 필요한 구간을 더 읽어라.
 같은 프로젝트에 참고할 만한 다른 문서가 있으면 list_project_documents/read_project_document_chunk로 확인할 수 있다.
-제출 전에 초안을 write_scratch_file로 저장하고 read_scratch_file로 다시 읽어 다듬은 뒤 제출하라.
-분석이 끝나면 submit_result 툴을 호출해 다음 필드를 제출하라: businessContext, keyUsers, process, systems, businessRules, decisionPoints, exceptions, painPoints, aiOpportunities, unknowns.
-각 배열 항목은 문서 내용에 근거한 구체적 문장으로 작성하고 일반론은 금지한다.`,
-      tools: [planTool, readChunkTool, ...scratchTools, ...projectDocTools, submitTool],
-      maxTurns: 8,
-      maxTokensPerTurn: 4096
+
+이번 요청에서는 아래 필드만 생성한다 (다른 필드는 생성하지 않는다):
+${group.fieldsGuide}
+각 배열 항목은 문서 내용에 근거한 구체적 문장으로 작성하고 일반론은 금지한다.
+제출 전에 초안을 write_scratch_file로 저장하고 read_scratch_file로 다시 읽어 다듬은 뒤, submit_result 툴을 호출해 위 필드만 담아 제출하라.`,
+        tools: [
+          createPlanTool(runId),
+          readChunkTool,
+          ...createScratchWorkspaceTools(runId),
+          ...createProjectDocumentTools(projectId),
+          createSubmitTool(group.schema, "문서 분석 결과의 일부 필드를 제출한다.")
+        ],
+        maxTurns: 5,
+        maxTokensPerTurn: 3000
+      };
     });
 
-    saveAgentRunLog(result);
+    const results = await runFanOutAgents(tasks);
+    results.forEach((r) => saveAgentRunLog(r));
 
-    if (result.status === "submitted" && result.submission) {
-      return result.submission as DocumentAnalysis;
+    const failed = results.find((r) => r.status !== "submitted" || !r.submission);
+    if (failed) {
+      throw new Error(
+        `문서 분석 fan-out 중 일부 그룹이 결과를 제출하지 못했습니다 (${failed.runLabel} status=${failed.status}). ${failed.error ?? ""}`.trim()
+      );
     }
-    throw new Error(`문서 분석 에이전트가 최종 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
+
+    return results.reduce<Partial<DocumentAnalysis>>((acc, r) => ({ ...acc, ...(r.submission as object) }), {}) as DocumentAnalysis;
   } finally {
-    cleanupScratchWorkspace(runId);
+    for (const runId of runIds) cleanupScratchWorkspace(runId);
   }
 }
 

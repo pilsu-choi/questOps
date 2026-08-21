@@ -1,13 +1,17 @@
 import { z } from "zod";
+import { nanoid } from "nanoid";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
 import { toolCallingAvailable } from "../llm/toolCalling.js";
-import { runAgentLoop } from "../agent-runtime/loop.js";
-import { createSubmitTool } from "../agent-runtime/tools.js";
+import { runFanOutAgents } from "../agent-runtime/fanOut.js";
+import { createSubmitTool, createPlanTool, createWebSearchServerTool } from "../agent-runtime/tools.js";
+import { createScratchWorkspaceTools, cleanupScratchWorkspace } from "../agent-runtime/scratchTools.js";
+import { createProjectDocumentTools } from "../agent-runtime/projectDocumentTools.js";
 import { saveAgentRunLog } from "../agent-runtime/log.js";
 import type { DomainKnowledgeContent, DocumentAnalysis } from "../types.js";
 import { logDebug, logError } from "../logger.js";
 
 export interface DomainKnowledgeGenerationInput {
+  projectId: string;
   projectName: string;
   client: string;
   org?: string;
@@ -22,7 +26,7 @@ const SYSTEM_PROMPT = `당신은 기업 컨설팅 프로젝트에 처음 투입�
 반드시 문서에 실제로 등장하는 조직명, 시스템명, 용어, 수치, 규정을 그대로 사용하고, 문서에 없는 사실을 창작하지 않는다.
 문서만으로 판단하기 어려운 부분은 openQuestions에 남긴다.`;
 
-function buildUserPrompt(input: DomainKnowledgeGenerationInput): string {
+function buildAnalysisContext(input: DomainKnowledgeGenerationInput): string {
   const analysisText = input.analyses
     .map(
       (a, i) =>
@@ -40,7 +44,11 @@ function buildUserPrompt(input: DomainKnowledgeGenerationInput): string {
 목표: ${input.goal || "명시되지 않음"}
 
 --- 문서 분석 요약 ---
-${analysisText || "(없음)"}
+${analysisText || "(없음)"}`;
+}
+
+function buildUserPrompt(input: DomainKnowledgeGenerationInput): string {
+  return `${buildAnalysisContext(input)}
 
 위 내용을 근거로 다음 JSON을 생성하라:
 {
@@ -99,24 +107,116 @@ function heuristicGenerate(input: DomainKnowledgeGenerationInput): DomainKnowled
   };
 }
 
-async function generateDomainKnowledgeAgentic(input: DomainKnowledgeGenerationInput): Promise<DomainKnowledgeContent> {
-  const submitTool = createSubmitTool(DomainKnowledgeSchema, "도메인 지식 브리핑 내용을 제출한다.");
+// 11개 출력 필드를 통짜 대화 하나로 생성하던 것을, 서로 겹치지 않는 필드 그룹 3개로 나눠
+// 병렬 서브에이전트로 생성한다. 모든 서브에이전트가 동일한 SYSTEM_PROMPT와 동일한 문서 분석
+// 요약(buildAnalysisContext)을 공유하므로, 실제 조직명/시스템명/용어는 같은 소스 문서에서
+// 나온 값으로 자연히 일치한다 - 그룹 간에 다투는 지점은 "어떤 필드를 채울지"뿐이라 그 부분만
+// 프롬프트 + 부분 스키마(Zod pick)로 강제한다. 필드가 서로 겹치지 않아 병합은 단순 객체
+// 스프레드로 끝나고, 한 그룹이라도 실패하면(필드가 모두 필수라 부분 채움이 무의미) 즉시
+// throw해 상위 폴백(completeJSON)으로 넘긴다.
+const OverviewGroupSchema = DomainKnowledgeSchema.pick({
+  companyOverview: true,
+  businessDomain: true,
+  domainKeywords: true,
+  drivingDepartments: true,
+  businessScope: true
+});
+const SystemsRulesGroupSchema = DomainKnowledgeSchema.pick({
+  keySystems: true,
+  glossary: true,
+  domainRules: true
+});
+const StakeholdersRisksGroupSchema = DomainKnowledgeSchema.pick({
+  stakeholders: true,
+  risksAndConsiderations: true,
+  openQuestions: true
+});
 
-  const result = await runAgentLoop({
-    runLabel: "domainKnowledgeGeneration",
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: `${buildUserPrompt(input)}\n\n정리가 끝나면 submit_result 툴을 호출해 제출하라.`,
-    tools: [submitTool],
-    maxTurns: 6,
-    maxTokensPerTurn: 8000
-  });
+interface FieldGroupTemplate {
+  key: string;
+  schema: z.ZodTypeAny;
+  template: string;
+}
 
-  saveAgentRunLog(result);
-
-  if (result.status === "submitted" && result.submission) {
-    return result.submission as DomainKnowledgeContent;
+const FIELD_GROUP_TEMPLATES: FieldGroupTemplate[] = [
+  {
+    key: "overview",
+    schema: OverviewGroupSchema,
+    template: `{
+  "companyOverview": "대상 기업/사업의 배경, 목적, 맥락 (3-5문장, 실제 근거 기반)",
+  "businessDomain": "이 프로젝트가 속한 사업 도메인의 정의와 특성 (2-4문장)",
+  "domainKeywords": ["이 도메인을 이해하는 데 필요한 핵심 키워드/개념"],
+  "drivingDepartments": [{ "name": "사업을 추진하는 실제 부서/조직명", "role": "해당 부서의 역할과 책임" }],
+  "businessScope": ["이번 사업이 다루는 구체적인 업무 범위/내용"]
+}`
+  },
+  {
+    key: "systems_rules",
+    schema: SystemsRulesGroupSchema,
+    template: `{
+  "keySystems": ["관련된 실제 시스템/솔루션/연동 대상"],
+  "glossary": [{ "term": "문서에 등장하는 도메인 용어", "definition": "그 용어의 의미와 맥락" }],
+  "domainRules": ["이 도메인에서 반드시 지켜야 하는 규정/기준/제약"]
+}`
+  },
+  {
+    key: "stakeholders_risks",
+    schema: StakeholdersRisksGroupSchema,
+    template: `{
+  "stakeholders": ["실제 이해관계자 (부서, 역할, 외부기관 등)"],
+  "risksAndConsiderations": ["컨설팅 수행 시 유의해야 할 리스크와 고려사항"],
+  "openQuestions": ["문서만으로는 확인이 안 되어 인터뷰/추가 확인이 필요한 도메인 지식"]
+}`
   }
-  throw new Error(`도메인 지식 생성 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
+];
+
+async function generateDomainKnowledgeAgentic(input: DomainKnowledgeGenerationInput): Promise<DomainKnowledgeContent> {
+  const context = buildAnalysisContext(input);
+  const runIds: string[] = [];
+
+  try {
+    const tasks = FIELD_GROUP_TEMPLATES.map((group) => {
+      const runId = nanoid(12);
+      runIds.push(runId);
+      const submitTool = createSubmitTool(group.schema, "도메인 지식 브리핑의 일부 필드를 제출한다.");
+      const planTool = createPlanTool(runId);
+      const scratchTools = createScratchWorkspaceTools(runId);
+      const projectDocTools = createProjectDocumentTools(input.projectId);
+      return {
+        runLabel: `domainKnowledgeGeneration:${group.key}`,
+        systemPrompt: SYSTEM_PROMPT,
+        userPrompt: `${context}
+
+이번 요청에서는 아래 필드만 생성한다 (다른 필드는 생성하지 않는다):
+${group.template}
+
+요약만으로 근거가 부족하면 list_project_documents/read_project_document_chunk로 원문을 직접 확인할 수 있다.
+문서만으로 알 수 없는 업계 표준/공개 규정/일반 상식 수준의 배경지식이 필요하면 web search를 사용해 보강할 수 있다.
+단, 대상 기업 고유의 사실(조직명, 시스템명, 수치 등)은 반드시 문서 근거를 우선하고, 웹 검색으로 얻은 내용은 문서에 없는
+일반적 배경지식으로만 보조적으로 활용하며 문서 내용과 혼동해 창작하지 않는다.
+제출 전에 초안을 write_scratch_file로 저장하고 read_scratch_file로 다시 읽어 다듬은 뒤 제출하라.
+정리가 끝나면 submit_result 툴을 호출해 위 필드만 담아 제출하라.`,
+        tools: [planTool, ...scratchTools, ...projectDocTools, submitTool],
+        serverTools: [createWebSearchServerTool()],
+        maxTurns: 5,
+        maxTokensPerTurn: 5000
+      };
+    });
+
+    const results = await runFanOutAgents(tasks);
+    results.forEach((r) => saveAgentRunLog(r));
+
+    const failed = results.find((r) => r.status !== "submitted" || !r.submission);
+    if (failed) {
+      throw new Error(
+        `도메인 지식 fan-out 중 일부 그룹이 결과를 제출하지 못했습니다 (${failed.runLabel} status=${failed.status}). ${failed.error ?? ""}`.trim()
+      );
+    }
+
+    return results.reduce<Partial<DomainKnowledgeContent>>((acc, r) => ({ ...acc, ...(r.submission as object) }), {}) as DomainKnowledgeContent;
+  } finally {
+    for (const runId of runIds) cleanupScratchWorkspace(runId);
+  }
 }
 
 export async function generateDomainKnowledge(

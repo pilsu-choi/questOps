@@ -2,7 +2,7 @@ import { z } from "zod";
 import { nanoid } from "nanoid";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
 import { toolCallingAvailable } from "../llm/toolCalling.js";
-import { runAgentLoop } from "../agent-runtime/loop.js";
+import { runFanOutAgents } from "../agent-runtime/fanOut.js";
 import { createSubmitTool, createPlanTool } from "../agent-runtime/tools.js";
 import { createScratchWorkspaceTools, cleanupScratchWorkspace } from "../agent-runtime/scratchTools.js";
 import { createProjectDocumentTools } from "../agent-runtime/projectDocumentTools.js";
@@ -28,7 +28,7 @@ const SYSTEM_PROMPT = `당신은 컨설팅 발표자료를 만드는 Principal A
 반드시 제공된 자료의 실제 업무 용어, 조직명, 시스템명, 규칙을 사용하고 "다양한 이해관계자", "효율성 향상" 같은
 범용적인 문구를 만들지 않는다. 각 슬라이드는 근거 자료에서 실제로 확인된 내용만 담는다.`;
 
-function buildUserPrompt(input: PptInput): string {
+function buildContext(input: PptInput): string {
   const analysisText = input.analyses
     .map(
       (a, i) =>
@@ -68,7 +68,11 @@ ${agentText || "(아직 Agent 컨셉이 생성되지 않음)"}
 ${screensText || "(아직 Demo가 생성되지 않음)"}
 
 --- Demo 시나리오 (있는 경우) ---
-${scenarioText || "(없음)"}
+${scenarioText || "(없음)"}`;
+}
+
+function buildUserPrompt(input: PptInput): string {
+  return `${buildContext(input)}
 
 위 내용을 근거로 다음 순서/레이아웃의 슬라이드를 JSON으로 생성하라. 각 슬라이드는 order, title, layout 필수이며
 layout에 맞는 필드(bullets/table/columns/subtitle)를 채운다:
@@ -221,31 +225,101 @@ function heuristicSlidePlan(input: PptInput): PresentationSlide[] {
   return renumber(slides);
 }
 
+// 슬라이드 8~11장을 통짜 대화 하나로 생성하던 것을, 서로 독립적인 슬라이드 그룹 단위로
+// 나눠 병렬 서브에이전트로 생성한다. Agent/Demo 관련 슬라이드는 input.agent/input.screens가
+// 있을 때만 해당 그룹의 task 자체를 만든다 - 모델이 "만들지 말라"는 지시를 따르길 기대하는
+// 대신 애초에 요청을 안 보내는 쪽이 훨씬 확실하다. 순서/번호는 그룹을 고정된 배열 순서로
+// concat한 뒤 renumber()로 부여하므로 서브에이전트의 완료 순서와 무관하게 항상 올바르다.
+const GroupSlidesSchema = z.object({ slides: z.array(PresentationSlideSchema).min(1).max(3) });
+
+interface SlideGroupTemplate {
+  key: string;
+  template: string;
+}
+
+const OVERVIEW_GROUP: SlideGroupTemplate = {
+  key: "overview",
+  template: `1. title: 프로젝트명 + 부제(고객사·제안 성격)
+2. bullets: "Project Overview" — 프로젝트 설명, 관련 시스템, 분석 근거 요약`
+};
+const PROCESS_PAINPOINTS_GROUP: SlideGroupTemplate = {
+  key: "process_painpoints",
+  template: `1. process: "Current Business Process" — 현재 업무 프로세스 단계 (최대 6개)
+2. bullets: "Current Pain Points" — 실제 확인된 Pain Point (최대 6개)`
+};
+const INSIGHTS_GROUP: SlideGroupTemplate = {
+  key: "insights",
+  template: `1. table: "Interview Insights" — headers는 ["Type","Finding"], Tacit Knowledge 기반 행 (최대 8개)
+2. bullets: "Tacit Knowledge / Key Findings" — tacitRule/hidden_rule/workaround 유형 위주 (최대 6개)`
+};
+const AGENT_WORKFLOW_GROUP: SlideGroupTemplate = {
+  key: "agent_workflow",
+  template: `1. two-column: "Proposed AI Agent" — 좌측 컬럼 title은 Agent 이름, bullets는 목적, 우측 컬럼 title은 "적용 범위", bullets는 핵심 규칙 (최대 5개)
+2. process: "Agent Workflow" — Agent workflow 단계를 "order. [actor] name — description" 형식으로`
+};
+const DEMO_UI_GROUP: SlideGroupTemplate = {
+  key: "demo_ui",
+  template: `1. two-column: "Demo UI" — 좌측 컬럼 title "화면 구성" bullets는 각 화면 "title (status)", 우측 컬럼 title은 시나리오 caseId 또는 "Scenario" bullets는 시나리오 단계 "[status] label: detail"`
+};
+const BENEFITS_NEXT_GROUP: SlideGroupTemplate = {
+  key: "benefits_next",
+  template: `1. bullets: "Expected Benefits" — 근거 자료에 비추어 실제로 기대되는 효과 (반복 판단 자동화, 감사 대응력, human-in-the-loop 등 해당하는 것만)
+2. closing: "Next Steps" — 다음 단계 제안 (추가 인터뷰, Demo 피드백, PRD 작성 등)`
+};
+
+function buildGroupUserPrompt(input: PptInput, group: SlideGroupTemplate): string {
+  return `${buildContext(input)}
+
+이번 요청에서는 아래 슬라이드만 순서대로 생성한다 (order는 1부터 순서대로 매기면 되며, 전체 발표자료에 합쳐질 때 다시 번호가 매겨진다):
+${group.template}
+각 슬라이드는 title, layout 필수이며 layout에 맞는 필드(bullets/table/columns/subtitle/note)를 채운다.
+반드시 제공된 자료의 실제 업무 용어, 조직명, 시스템명, 규칙을 사용하고 범용적인 문구를 만들지 않는다.`;
+}
+
 async function generateSlidePlanAgentic(input: PptInput): Promise<PresentationSlide[]> {
-  const submitTool = createSubmitTool(SlidePlanSchema, "발표자료 슬라이드 구성안을 제출한다.");
-  const planTool = createPlanTool();
-  const runId = nanoid(12);
-  const scratchTools = createScratchWorkspaceTools(runId);
-  const projectDocTools = createProjectDocumentTools(input.projectId);
+  const groups: SlideGroupTemplate[] = [
+    OVERVIEW_GROUP,
+    PROCESS_PAINPOINTS_GROUP,
+    INSIGHTS_GROUP,
+    ...(input.agent ? [AGENT_WORKFLOW_GROUP] : []),
+    ...(input.screens?.length ? [DEMO_UI_GROUP] : []),
+    BENEFITS_NEXT_GROUP
+  ];
+  const runIds: string[] = [];
 
   try {
-    const result = await runAgentLoop({
-      runLabel: "pptGeneration",
-      systemPrompt: SYSTEM_PROMPT,
-      userPrompt: `${buildUserPrompt(input)}\n\n필요하면 list_project_documents/read_project_document_chunk로 이 프로젝트의 다른 문서를 참고할 수 있다.\n제출 전에 슬라이드 구성 초안을 write_scratch_file로 저장하고 다시 읽어 다듬을 수 있다.`,
-      tools: [planTool, ...scratchTools, ...projectDocTools, submitTool],
-      maxTurns: 6,
-      maxTokensPerTurn: 8000
+    const tasks = groups.map((group) => {
+      const runId = nanoid(12);
+      runIds.push(runId);
+      return {
+        runLabel: `pptGeneration:${group.key}`,
+        systemPrompt: SYSTEM_PROMPT,
+        userPrompt: `${buildGroupUserPrompt(input, group)}\n\n필요하면 list_project_documents/read_project_document_chunk로 이 프로젝트의 다른 문서를 참고할 수 있다.\n작성이 끝나면 submit_result 툴을 호출해 제출하라.`,
+        tools: [
+          createPlanTool(runId),
+          ...createScratchWorkspaceTools(runId),
+          ...createProjectDocumentTools(input.projectId),
+          createSubmitTool(GroupSlidesSchema, "이 그룹에 해당하는 슬라이드를 제출한다.")
+        ],
+        maxTurns: 3,
+        maxTokensPerTurn: 3000
+      };
     });
 
-    saveAgentRunLog(result);
+    const results = await runFanOutAgents(tasks);
+    results.forEach((r) => saveAgentRunLog(r));
 
-    if (result.status === "submitted" && result.submission) {
-      return renumber((result.submission as { slides: PresentationSlide[] }).slides);
+    const failed = results.find((r) => r.status !== "submitted" || !r.submission);
+    if (failed) {
+      throw new Error(`PPT 슬라이드 fan-out 중 일부 그룹이 실패했습니다 (${failed.runLabel} status=${failed.status}). ${failed.error ?? ""}`.trim());
     }
-    throw new Error(`PPT 생성 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
+
+    // groups 배열 순서대로 tasks를 만들었고 runFanOutAgents는 입력 인덱스 순서로 결과를
+    // 반환하므로, 완료 순서와 무관하게 concat만으로 항상 올바른 슬라이드 순서가 된다.
+    const slides = results.flatMap((r) => (r.submission as { slides: PresentationSlide[] }).slides);
+    return renumber(slides);
   } finally {
-    cleanupScratchWorkspace(runId);
+    for (const runId of runIds) cleanupScratchWorkspace(runId);
   }
 }
 

@@ -1,8 +1,11 @@
 import { z } from "zod";
+import { nanoid } from "nanoid";
 import { completeJSON, llmAvailable, NoLLMError } from "../llm/provider.js";
 import { toolCallingAvailable } from "../llm/toolCalling.js";
 import { runAgentLoop } from "../agent-runtime/loop.js";
-import { createSubmitTool, createReadTextChunkTool } from "../agent-runtime/tools.js";
+import { createSubmitTool, createReadTextChunkTool, createPlanTool } from "../agent-runtime/tools.js";
+import { createScratchWorkspaceTools, cleanupScratchWorkspace } from "../agent-runtime/scratchTools.js";
+import { createProjectDocumentTools } from "../agent-runtime/projectDocumentTools.js";
 import { saveAgentRunLog } from "../agent-runtime/log.js";
 import { splitSentences } from "./textUtils.js";
 import { logDebug, logError } from "../logger.js";
@@ -96,37 +99,47 @@ function heuristicMap(transcript: string, questions: QuestionRef[]): MappedAnswe
   return results;
 }
 
-async function mapTranscriptToAnswersAgentic(transcript: string, questions: QuestionRef[]): Promise<MappedAnswer[]> {
+async function mapTranscriptToAnswersAgentic(transcript: string, questions: QuestionRef[], projectId: string): Promise<MappedAnswer[]> {
   const readChunkTool = createReadTextChunkTool("read_transcript_chunk", "인터뷰 녹취록/회의록 원문을 청크 단위로 읽는다.", transcript);
   const submitTool = createSubmitTool(MappedAnswersOutputSchema, "질문별로 매핑된 답변을 제출한다.");
   const qList = questions.map((q) => `[${q.id}] (${q.category}) ${q.question}`).join("\n");
   const preview = transcript.slice(0, 4000);
+  const runId = nanoid(12);
+  const planTool = createPlanTool(runId);
+  const scratchTools = createScratchWorkspaceTools(runId);
+  const projectDocTools = createProjectDocumentTools(projectId);
 
-  const result = await runAgentLoop({
-    runLabel: "interviewAnswerMapping",
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: `인터뷰 질문 목록:
+  try {
+    const result = await runAgentLoop({
+      runLabel: "interviewAnswerMapping",
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: `인터뷰 질문 목록:
 ${qList}
 
 --- 녹취록/회의록 원문 미리보기 (전체 ${transcript.length}자) ---
 ${preview}
 --- 미리보기 끝 ---
 
-미리보기만으로 부족하면 read_transcript_chunk 툴로 이어서 읽어라. 각 질문에 대해 녹취록에서 실제로 다뤄진 경우에만 submit_result 툴로 answers 배열을 제출하라. 다루지 않은 질문은 포함하지 않는다.`,
-    tools: [readChunkTool, submitTool],
-    maxTurns: 6,
-    maxTokensPerTurn: 4096
-  });
+미리보기만으로 부족하면 read_transcript_chunk 툴로 이어서 읽어라. 질문의 배경 확인이 필요하면 list_project_documents/read_project_document_chunk로 원본 문서를 참고할 수 있다.
+제출 전에 매핑 초안을 write_scratch_file로 저장하고 다시 읽어 다듬을 수 있다.
+각 질문에 대해 녹취록에서 실제로 다뤄진 경우에만 submit_result 툴로 answers 배열을 제출하라. 다루지 않은 질문은 포함하지 않는다.`,
+      tools: [planTool, readChunkTool, ...scratchTools, ...projectDocTools, submitTool],
+      maxTurns: 8,
+      maxTokensPerTurn: 4096
+    });
 
-  saveAgentRunLog(result);
+    saveAgentRunLog(result);
 
-  if (result.status === "submitted" && result.submission) {
-    return (result.submission as { answers: MappedAnswer[] }).answers;
+    if (result.status === "submitted" && result.submission) {
+      return (result.submission as { answers: MappedAnswer[] }).answers;
+    }
+    throw new Error(`인터뷰 답변 매핑 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
+  } finally {
+    cleanupScratchWorkspace(runId);
   }
-  throw new Error(`인터뷰 답변 매핑 에이전트가 결과를 제출하지 못했습니다 (status=${result.status}). ${result.error ?? ""}`.trim());
 }
 
-export async function mapTranscriptToAnswers(transcript: string, questions: QuestionRef[]): Promise<MappedAnswer[]> {
+export async function mapTranscriptToAnswers(transcript: string, questions: QuestionRef[], projectId: string): Promise<MappedAnswer[]> {
   const overallStart = Date.now();
   logDebug(`[interviewAnswerMapping] start transcriptChars=${transcript.length} questions=${questions.length}`);
 
@@ -134,7 +147,7 @@ export async function mapTranscriptToAnswers(transcript: string, questions: Ques
     if (toolCallingAvailable()) {
       logDebug(`[interviewAnswerMapping] attempting agentic path`);
       try {
-        const raw = await mapTranscriptToAnswersAgentic(transcript, questions);
+        const raw = await mapTranscriptToAnswersAgentic(transcript, questions, projectId);
         logDebug(`[interviewAnswerMapping] agentic path returned ${raw.length} mapped answers, totalElapsedMs=${Date.now() - overallStart}`);
         if (raw.length > 0) return raw.filter((r) => r.questionId && r.answerText?.trim());
       } catch (err) {
