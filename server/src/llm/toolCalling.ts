@@ -6,7 +6,7 @@
 
 import { NoLLMError, resolveActiveConfig, fetchWithTimeout } from "./provider.js";
 import { logDebug } from "../logger.js";
-import type { AgentTool } from "../agent-runtime/types.js";
+import type { AgentTool, ServerTool } from "../agent-runtime/types.js";
 
 export interface ToolCallMessage {
   role: "user" | "assistant" | "tool";
@@ -26,11 +26,13 @@ export function toolCallingAvailable(): boolean {
   return resolveActiveConfig()?.provider === "openrouter";
 }
 
-function toOpenAiTools(tools: AgentTool[]) {
-  return tools.map((t) => ({
+function toOpenAiTools(tools: AgentTool[], serverTools?: ServerTool[]) {
+  const functionTools = tools.map((t) => ({
     type: "function",
     function: { name: t.name, description: t.description, parameters: t.parameters }
   }));
+  const openRouterServerTools = (serverTools ?? []).map((t) => ({ type: t.type, ...(t.parameters ? { parameters: t.parameters } : {}) }));
+  return [...functionTools, ...openRouterServerTools];
 }
 
 function toOpenAiMessages(systemPrompt: string, messages: ToolCallMessage[]) {
@@ -107,7 +109,8 @@ export async function stepWithTools(
   messages: ToolCallMessage[],
   tools: AgentTool[],
   maxTokens: number,
-  forceTool?: string
+  forceTool?: string,
+  serverTools?: ServerTool[]
 ): Promise<ToolCallStepResult> {
   const cfg = resolveActiveConfig();
   if (!cfg) throw new NoLLMError();
@@ -119,7 +122,10 @@ export async function stepWithTools(
   const promptChars = JSON.stringify(openAiMessages).length;
   const start = Date.now();
   logDebug(
-    `[llm][toolCalling] request model=${cfg.model} maxTokens=${maxTokens} messages=${openAiMessages.length} promptChars=${promptChars} tools=${tools.map((t) => t.name).join(",")}`
+    `[llm][toolCalling] request model=${cfg.model} maxTokens=${maxTokens} messages=${openAiMessages.length} promptChars=${promptChars} tools=${tools
+      .map((t) => t.name)
+      .concat((serverTools ?? []).map((t) => t.type))
+      .join(",")}`
   );
 
   const { res, errorMessage } = await fetchWithRetry(() =>
@@ -135,7 +141,7 @@ export async function stepWithTools(
         model: cfg.model,
         max_tokens: maxTokens,
         messages: openAiMessages,
-        tools: toOpenAiTools(tools),
+        tools: toOpenAiTools(tools, serverTools),
         tool_choice: buildToolChoice(forceTool)
       })
     })

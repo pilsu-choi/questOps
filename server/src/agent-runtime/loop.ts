@@ -110,7 +110,8 @@ async function tryRescueTurn(
     rescueMessages,
     config.tools,
     config.maxTokensPerTurn ?? DEFAULT_MAX_TOKENS_PER_TURN,
-    SUBMIT_TOOL_NAME
+    SUBMIT_TOOL_NAME,
+    config.serverTools
   );
 
   if (step.stopReason === "error") {
@@ -158,13 +159,13 @@ export async function runAgentLoop(config: AgentRunConfig): Promise<AgentRunResu
     const turnStart = Date.now();
     logDebug(`[agent-loop] [${config.runLabel}] turn ${turn}/${maxTurns} calling model...`);
     const turnForceTool = computePlanForceTool(turn, config.tools);
-    let step = await stepWithTools(config.systemPrompt, messages, config.tools, maxTokens, turnForceTool);
+    let step = await stepWithTools(config.systemPrompt, messages, config.tools, maxTokens, turnForceTool, config.serverTools);
 
     if (step.stopReason === "error" && turnForceTool) {
       logDebug(
         `[agent-loop] [${config.runLabel}] turn ${turn} forced tool_choice(${turnForceTool}) failed (${step.errorMessage}), retrying without forceTool`
       );
-      step = await stepWithTools(config.systemPrompt, messages, config.tools, maxTokens);
+      step = await stepWithTools(config.systemPrompt, messages, config.tools, maxTokens, undefined, config.serverTools);
     }
     logDebug(
       `[agent-loop] [${config.runLabel}] turn ${turn} model responded elapsedMs=${Date.now() - turnStart} stopReason=${step.stopReason} toolCalls=${step.toolCalls.length}`

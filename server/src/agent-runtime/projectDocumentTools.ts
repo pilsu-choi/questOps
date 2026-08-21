@@ -21,7 +21,8 @@ export function createProjectDocumentTools(projectId: string): AgentTool[] {
 
   const readTool: AgentTool = {
     name: "read_project_document_chunk",
-    description: "list_project_documents로 확인한 문서 id의 원문을 청크 단위로 읽는다. offset(기본 0)부터 최대 8000자.",
+    description:
+      "list_project_documents로 확인한 문서 id의 원문을 청크 단위로 읽는다. offset(기본 0)부터 최대 8000자, 문단 경계에 맞춰 자르고 이어 읽을 offset은 앞 청크와 약간 겹치게 안내된다.",
     parameters: {
       type: "object",
       properties: {

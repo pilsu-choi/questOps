@@ -25,11 +25,24 @@ export interface AgentTool<TArgs = any> {
   execute(args: TArgs): Promise<AgentToolResult> | AgentToolResult;
 }
 
+/**
+ * OpenRouter가 서버 측에서 직접 실행하는 tool(예: openrouter:web_search).
+ * AgentTool과 달리 execute가 없다 - 모델이 호출을 결정하면 OpenRouter가 검색을 실행하고
+ * 결과를 같은 응답 안에서 모델에게 되돌려주므로, 우리 쪽 loop.ts는 이 tool의 호출을
+ * 별도로 디스패치할 필요가 없다. tools 배열에 그대로 얹어 요청에 포함시키기만 하면 된다.
+ */
+export interface ServerTool {
+  type: string;
+  parameters?: Record<string, unknown>;
+}
+
 export interface AgentRunConfig {
   runLabel: string;
   systemPrompt: string;
   userPrompt: string;
   tools: AgentTool[];
+  /** OpenRouter가 서버 측에서 실행하는 추가 tool (예: 웹서치). 기본 없음. */
+  serverTools?: ServerTool[];
   /** 기본 5. 개방형 루프가 아니므로 반드시 상한을 둔다. */
   maxTurns?: number;
   maxTokensPerTurn?: number;
