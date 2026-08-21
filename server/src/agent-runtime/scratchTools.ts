@@ -1,12 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { fileURLToPath } from "node:url";
 import type { AgentTool } from "./types.js";
 
 const FILENAME_PATTERN = /^[A-Za-z0-9_.-]+$/;
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// server/src/agent-runtime -> server/tmp
+const TMP_ROOT = path.join(__dirname, "..", "..", "tmp");
+
 function scratchRoot(runId: string): string {
-  return path.join(os.tmpdir(), "questops-agent-scratch", runId);
+  return path.join(TMP_ROOT, "questops-agent-scratch", runId);
 }
 
 function assertSafeFilename(name: string): void {

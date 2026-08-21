@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "dev": "tsx watch --exclude \"**/uploads/**\" --exclude \"**/data/**\" --exclude \"**/tmp/**\" --env-file-if-exists=.env src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "logs:agent": "tsx src/scripts/watchAgentLogs.ts"
